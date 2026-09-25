@@ -1,4 +1,5 @@
 # Files that run on the robot (Linux) keep LF line endings.
-robot/* text eol=lf
+reachy_kit/robot/* text eol=lf
+admin/robot/* text eol=lf
 *.py text eol=lf
 *.bat text eol=crlf

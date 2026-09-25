@@ -5,5 +5,5 @@
   "ssh_password": "ASK-THE-ROBOT-ADMIN",
   "isolated_subnet": "",
   "volume": 100,
-  "webcam": {"width": 640, "height": 360, "fps": 15}
+  "webcam": {"width": 640, "height": 360, "fps": 8}
 }

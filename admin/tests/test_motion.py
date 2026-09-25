@@ -1,6 +1,10 @@
-"""Motion test over the SSH tunnel (run reachy_tunnel.py first)."""
+"""Motion test over the SSH tunnel (run `python -m reachy_kit.tunnel <robot>` first)."""
 
+import os
 import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))  # repo root
+
 import time
 
 import numpy as np
@@ -8,7 +12,7 @@ import numpy as np
 from reachy_mini import ReachyMini
 from reachy_mini.utils import create_head_pose
 
-from reachy_remote import connect
+from reachy_kit.remote import connect
 
 HOST = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"  # 127.0.0.2 = mini-2, 127.0.0.3 = mini-3
 

@@ -1,4 +1,4 @@
-"""Use the Reachy Mini SDK through the SSH tunnel (reachy_tunnel.py / run.bat).
+"""Use the Reachy Mini SDK through the SSH tunnel (run.bat / reachy_kit.tunnel).
 
 Over the campus VPN only TCP through the tunnel works. The SDK's camera and
 audio use WebRTC (signaling to the robot's lab Wi-Fi address, media over UDP),
@@ -10,7 +10,7 @@ replaced by TunnelMedia, which offers the same calls over the tunnel:
     speaker     start_playing(), push_audio_sample()   -> raw PCM, port 8093
     sounds      play_sound("wake_up.wav"), stop_sound() -> daemon HTTP API
 
-    from reachy_remote import connect
+    from reachy_kit import connect
 
     with connect() as mini:                   # host defaults to 127.0.0.1
         mini.wake_up()                        # head up + start-up sound
@@ -28,7 +28,7 @@ from typing import Optional
 import numpy as np
 from reachy_mini import ReachyMini
 
-from reachy_tunnel import MIC_PORT, ROBOT_CAMERA_PORT, SPEAKER_PORT
+from .tunnel import MIC_PORT, ROBOT_CAMERA_PORT, SPEAKER_PORT
 
 # The SDK looks for a local Reachy audio device, which this PC never has.
 logging.getLogger("reachy_mini.media.audio_control_utils").setLevel(logging.CRITICAL)

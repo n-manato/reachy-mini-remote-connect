@@ -4,12 +4,16 @@ Run reachy_tunnel.py first; the frame comes from the robot-camera MJPEG
 stream on port 8091, so this works over the VPN.
 """
 
+import os
 import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))  # repo root
+
 import time
 import urllib.request
 
-from reachy_remote import connect
-from reachy_tunnel import ROBOT_CAMERA_PORT
+from reachy_kit.remote import connect
+from reachy_kit.tunnel import ROBOT_CAMERA_PORT
 
 HOST = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"  # 127.0.0.2 = mini-2, 127.0.0.3 = mini-3
 

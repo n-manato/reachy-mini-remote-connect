@@ -1,4 +1,4 @@
-"""One-click connection to a Reachy Mini over GlobalProtect.
+"""Connect to a Reachy Mini over GlobalProtect and run a student app on it.
 
 GlobalProtect must be connected (on or off campus): it routes the robots'
 eduroam addresses into the VPN, and eduroam itself blocks client-to-client.
@@ -6,32 +6,38 @@ eduroam addresses into the VPN, and eduroam itself blocks client-to-client.
 1. Reads the robot from robot_config.json
 2. Opens an SSH tunnel (ports 8000, 8443, 8090-8093 -> 127.0.0.1)
 3. Wakes the robot up (head up + start-up sound)
-4. Opens a browser page with the robot camera, the USB webcam (a panel shows
-   "Not connected" when its camera is missing) and a button to listen to the
-   robot microphone
-5. On Ctrl+C or the "Quit" button: robot goes to sleep, everything closes
+4. Opens the check page in the browser: robot camera, USB webcam (a panel shows
+   "Not connected" when its camera is missing), a button to listen to the
+   robot microphone, and the app's state
+5. Runs the app (a ReachyMiniApp subclass, my_app.py by default) exactly like
+   the SDK does, but with a ReachyMini that works over the tunnel
+6. On Ctrl+C or the "Quit" button: stops the app, puts the robot to sleep,
+   closes everything
 
 Usage:
-    run.bat          (or: .venv\\Scripts\\python.exe reachy_connect.py)
+    run.bat [APP.py]     (or: .venv\\Scripts\\python.exe -m reachy_kit.launcher [APP.py])
 
 Copy robot_config.example.json to robot_config.json and fill in the robot's
 name, IP and SSH login (ask the robot admin).
 """
 
 import http.server
+import importlib.util
 import ipaddress
 import json
 import os
 import socket
 import sys
 import threading
+import traceback
 import urllib.request
 import webbrowser
 
-from reachy_tunnel import MIC_PORT, ROBOT_CAMERA_PORT, WEBCAM_PORT, close_tunnel, open_tunnel
+from .tunnel import MIC_PORT, ROBOT_CAMERA_PORT, WEBCAM_PORT, close_tunnel, open_tunnel
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(HERE, "robot_config.json")
+ROOT = os.path.dirname(HERE)
+CONFIG_PATH = os.path.join(ROOT, "robot_config.json")
 LOCAL = "127.0.0.1"
 STREAMS = {  # panel id -> MJPEG server on the robot, reached through the tunnel
     "robot": f"http://{LOCAL}:{ROBOT_CAMERA_PORT}",
@@ -49,7 +55,7 @@ section{{flex:1 1 480px;min-width:0}} h2{{font-size:15px;margin:6px 0}}
 .view img{{width:100%;height:100%;object-fit:contain}} .nc{{color:#888;font-size:20px}}
 button{{font-size:14px;padding:6px 16px}}
 </style></head><body>
-<header><div><b>{name}</b> ({ip})</div><div id="state"></div>
+<header><div><b>{name}</b> ({ip})</div><div>App: <b id="app">-</b> <span id="state"></span></div>
 <div><button id="listen">Listen to robot mic</button> <button id="quit">Quit (robot goes to sleep)</button></div></header>
 <main>
 <section><h2>Robot camera</h2><div class="view" id="robot"><span class="nc">Not connected</span></div></section>
@@ -61,6 +67,7 @@ const on = {{}};
 async function poll() {{
   try {{
     const s = await (await fetch('/status')).json();
+    document.getElementById('app').textContent = s.app;
     for (const id in urls) {{
       if (s[id] && !on[id]) {{ document.getElementById(id).innerHTML = '<img src="' + urls[id] + '/stream">'; on[id] = true; }}
       if (!s[id] && on[id]) {{ document.getElementById(id).innerHTML = '<span class="nc">Not connected</span>'; on[id] = false; }}
@@ -111,7 +118,10 @@ document.getElementById('quit').onclick = async () => {{
 
 def fail(msg: str) -> None:
     print(f"\n[ERROR] {msg}\n")
-    input("Press Enter to close...")
+    try:
+        input("Press Enter to close...")  # keep the run.bat window open
+    except EOFError:
+        pass
     sys.exit(1)
 
 
@@ -127,7 +137,7 @@ def load_config() -> dict:
         fail(f"robot_config.json is missing: {', '.join(missing)}")
     cfg.setdefault("ssh_user", "pollen")
     cfg.setdefault("volume", 100)
-    webcam = {"width": 640, "height": 360, "fps": 15}  # eduroam + VPN cannot carry 720p
+    webcam = {"width": 640, "height": 360, "fps": 8}  # the VPN is slow: leave room for control
     webcam.update(cfg.get("webcam", {}))
     cfg["webcam"] = webcam
     return cfg
@@ -164,9 +174,13 @@ def preflight(ip: str, isolated_subnet: str = "") -> None:
         # through the Wi-Fi directly means GP is down.
         fail("Traffic to the robot is not going through GlobalProtect.\n"
              "        Connect GlobalProtect and try again.")
-    try:
-        socket.create_connection((ip, 22), timeout=3).close()
-    except OSError:
+    for attempt in range(3):  # the VPN sometimes drops the first packets after (re)connecting
+        try:
+            socket.create_connection((ip, 22), timeout=5).close()
+            break
+        except OSError:
+            pass
+    else:
         fail(f"Cannot reach the robot ({ip}:22).\n"
              "        - Is GlobalProtect connected?\n"
              "        - Is the robot powered on?\n"
@@ -181,8 +195,49 @@ def stream_available(url: str) -> bool:
         return False
 
 
-def make_viewer(cfg: dict, stop: threading.Event) -> http.server.ThreadingHTTPServer:
-    status = {name: False for name in STREAMS}
+def load_app(path: str):
+    """Import APP.py and instantiate the ReachyMiniApp subclass it defines."""
+    from reachy_mini.apps.app import ReachyMiniApp
+
+    if not os.path.isfile(path):
+        fail(f"App file not found: {path}")
+    sys.path.insert(0, os.path.dirname(os.path.abspath(path)))  # let the app import its neighbours
+    spec = importlib.util.spec_from_file_location("student_app", path)
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        traceback.print_exc()
+        fail(f"Could not load {path} (see the error above).")
+    apps = [c for c in vars(module).values()
+            if isinstance(c, type) and issubclass(c, ReachyMiniApp) and c.__module__ == module.__name__]
+    if not apps:
+        fail(f"{path} does not define a class that inherits from ReachyMiniApp.")
+    return apps[0]()
+
+
+def run_app(app, state: dict) -> None:
+    """Run the app like the SDK's wrapped_run, but with the tunnel-aware ReachyMini."""
+    import reachy_mini.apps.app as app_module
+
+    from .remote import TunnelReachyMini
+
+    # wrapped_run() builds its ReachyMini through this name; a plain one would
+    # try WebRTC and hang over the VPN.
+    app_module.ReachyMini = TunnelReachyMini
+    state["app"] = "running"
+    try:
+        app.wrapped_run()
+        state["app"] = "finished"
+        if not app.stop_event.is_set():  # the app ended on its own, not via Quit
+            print("App finished. Press Quit (or Ctrl+C) to disconnect.")
+    except Exception:
+        state["app"] = "error (see the console)"
+        traceback.print_exc()
+
+
+def make_viewer(cfg: dict, stop: threading.Event, status: dict) -> http.server.ThreadingHTTPServer:
+    status.update({name: False for name in STREAMS})
 
     def watch_streams() -> None:
         while not stop.is_set():
@@ -226,6 +281,10 @@ def make_viewer(cfg: dict, stop: threading.Event) -> http.server.ThreadingHTTPSe
 
 
 def main() -> None:
+    app_path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "my_app.py")
+    if not os.path.isfile(app_path):
+        print(f"No app at {app_path}; only the check page will run.")
+        app_path = ""
     cfg = load_config()
     print(f"Robot: {cfg['name']} ({cfg['ip']})")
     preflight(cfg["ip"], cfg.get("isolated_subnet", ""))
@@ -237,16 +296,17 @@ def main() -> None:
                                       f"--width {int(w['width'])} --height {int(w['height'])} --fps {int(w['fps'])}")
     except OSError as e:
         if getattr(e, "winerror", None) == 10048 or "address already in use" in str(e).lower():
-            fail("Port 8000/8443/8090-8093 is already in use. Is another tunnel or reachy_connect running?")
+            fail("Port 8000/8443/8090-8093 is already in use. Is another run.bat or tunnel running?")
         fail(f"SSH connection failed: {e}")
     except Exception as e:
         fail(f"SSH connection failed: {e}")
 
     # Imported late: loading the SDK takes a few seconds.
-    from reachy_remote import connect
+    from .remote import connect
 
     stop = threading.Event()
-    viewer = None
+    status = {"app": "none"}
+    viewer = app = app_thread = None
     try:
         with connect(LOCAL) as mini:
             print("Waking up the robot...")
@@ -254,10 +314,16 @@ def main() -> None:
             mini.enable_motors()  # motors come up disabled after a robot reboot
             mini.wake_up()  # head up + start-up sound (played through the daemon API)
 
-            viewer = make_viewer(cfg, stop)
+            viewer = make_viewer(cfg, stop, status)
             url = f"http://{LOCAL}:{viewer.server_address[1]}/"
-            print(f"Viewer: {url}")
+            print(f"Check page: {url}")
             webbrowser.open(url)
+
+            if app_path:
+                app = load_app(app_path)
+                print(f"Starting app: {type(app).__name__} ({app_path})")
+                app_thread = threading.Thread(target=run_app, args=(app, status), daemon=True)
+                app_thread.start()
             print("Running. Press Ctrl+C or the Quit button to stop.")
             try:
                 while not stop.wait(0.5):
@@ -265,6 +331,12 @@ def main() -> None:
             except KeyboardInterrupt:
                 pass
             stop.set()
+            if app_thread and app_thread.is_alive():
+                print("Stopping the app...")
+                app.stop()
+                app_thread.join(timeout=10)
+                if app_thread.is_alive():
+                    print("The app did not stop within 10 s (does run() check stop_event?).")
             print("Putting the robot to sleep...")
             mini.goto_sleep()
     finally:

@@ -1,14 +1,18 @@
-"""Camera / microphone / speaker test over the SSH tunnel (run reachy_tunnel.py first).
+"""Camera / microphone / speaker test over the SSH tunnel (run `python -m reachy_kit.tunnel <robot>` first).
 
-Uses reachy_remote.connect(), so it works over the VPN only.
+Uses reachy_kit.connect(), so it works over the VPN only.
 
 - Camera: get_frame() + saves one frame to camera_test_<HOST>.jpg
 - Speaker (sound file via daemon API) -> mic: plays vpn_beep.wav (C5-E5-G5), checks the mic hears it
 - Speaker (push_audio_sample from PC) -> mic: streams a 440 Hz tone, checks the mic hears it
 """
 
-import io
+import os
 import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))  # repo root
+
+import io
 import threading
 import time
 import wave
@@ -16,7 +20,7 @@ import wave
 import numpy as np
 import requests
 
-from reachy_remote import connect
+from reachy_kit.remote import connect
 
 HOST = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"  # 127.0.0.2 = mini-2, 127.0.0.3 = mini-3
 

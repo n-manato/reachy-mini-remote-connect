@@ -6,14 +6,14 @@ Each robot gets its own loopback address, so several tunnels can run at once
 with the same port numbers (the SDK always uses 8443 for WebRTC signaling).
 
 Usage:
-    python reachy_tunnel.py ROBOT      ROBOT = a name from robots.json, or an IP
+    python -m reachy_kit.tunnel ROBOT      ROBOT = a name from admin/robots.json, or an IP
 
-robots.json (not committed, see robots.example.json) maps names to
+admin/robots.json (not committed, see admin/robots.example.json) maps names to
 [robot IP, local address], e.g. {"mini-2": ["10.0.0.12", "127.0.0.2"]}.
 
-Keep it running, then use the robot from code with reachy_remote.connect("127.0.0.2").
+Keep it running, then use the robot from code with reachy_kit.connect("127.0.0.2").
 
-It also starts, on the robot (robot/*.py):
+It also starts, on the robot (reachy_kit/robot/*.py):
     http://<local address>:8090/      USB webcam watching the robot (if plugged in)
     http://<local address>:8091/      the robot's own camera
     http://<local address>:8092/mic   robot microphone (raw PCM)
@@ -37,7 +37,7 @@ import paramiko
 logging.getLogger("paramiko.transport").setLevel(logging.CRITICAL)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROBOTS_PATH = os.path.join(HERE, "robots.json")
+ROBOTS_PATH = os.path.join(os.path.dirname(HERE), "admin", "robots.json")
 WEBCAM_PORT = 8090        # USB webcam watching the robot (MJPEG)
 ROBOT_CAMERA_PORT = 8091  # robot's own camera (MJPEG)
 MIC_PORT = 8092           # robot microphone (raw PCM over HTTP)
@@ -136,40 +136,56 @@ class ThreadedServerV6(ThreadedServer):
     address_family = socket.AF_INET6
 
 
-def open_tunnel(robot_ip: str, password: str, local_addr: str = "127.0.0.1",
-                 user: str = "pollen", webcam_args: str = "") -> tuple[paramiko.SSHClient, list]:
-    """SSH to the robot, start the webcam stream and forward PORTS to local_addr.
+CONTROL_PORTS = [8000, 8443]
+MEDIA_PORTS = [WEBCAM_PORT, ROBOT_CAMERA_PORT, MIC_PORT, SPEAKER_PORT]
 
-    webcam_args is passed to both robot/webcam_stream.py instances (webcam and
-    robot camera), e.g. "--width 640 --height 360 --fps 15".
-    """
+
+def _ssh(robot_ip: str, user: str, password: str) -> paramiko.SSHClient:
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     client.connect(robot_ip, username=user, password=password, timeout=10,
                    allow_agent=False, look_for_keys=False)
-    transport = client.get_transport()
-    transport.set_keepalive(30)
-    start_robot_services(client, webcam_args)
+    client.get_transport().set_keepalive(30)
+    return client
+
+
+def open_tunnel(robot_ip: str, password: str, local_addr: str = "127.0.0.1",
+                 user: str = "pollen", webcam_args: str = "") -> tuple[list, list]:
+    """SSH to the robot, start the robot-side services and forward PORTS to local_addr.
+
+    Control (daemon API) and media (camera/audio streams) use separate SSH
+    connections: over a slow VPN, video queued in a shared connection delays
+    motion commands by seconds, and the SDK then times out.
+
+    webcam_args is passed to both robot/webcam_stream.py instances (webcam and
+    robot camera), e.g. "--width 640 --height 360 --fps 8".
+    Returns (ssh clients, local servers) for close_tunnel().
+    """
+    control = _ssh(robot_ip, user, password)
+    media = _ssh(robot_ip, user, password)
+    start_robot_services(media, webcam_args)
 
     listen = [(ThreadedServer, local_addr)]
     if local_addr == "127.0.0.1":
         listen.append((ThreadedServerV6, "::1"))  # so "localhost" works too
     servers = []
-    for port in PORTS:
-        handler = make_handler(transport, port)
-        for server_cls, addr in listen:
-            server = server_cls((addr, port), handler)
-            threading.Thread(target=server.serve_forever, daemon=True).start()
-            servers.append(server)
-        print(f"tunnel up: {local_addr}:{port} -> {robot_ip}:{port}", flush=True)
-    return client, servers
+    for client, ports in ((control, CONTROL_PORTS), (media, MEDIA_PORTS)):
+        for port in ports:
+            handler = make_handler(client.get_transport(), port)
+            for server_cls, addr in listen:
+                server = server_cls((addr, port), handler)
+                threading.Thread(target=server.serve_forever, daemon=True).start()
+                servers.append(server)
+            print(f"tunnel up: {local_addr}:{port} -> {robot_ip}:{port}", flush=True)
+    return [control, media], servers
 
 
-def close_tunnel(client: paramiko.SSHClient, servers: list) -> None:
+def close_tunnel(clients: list, servers: list) -> None:
     for server in servers:
         server.shutdown()
         server.server_close()
-    client.close()
+    for client in clients:
+        client.close()
 
 
 def wait_forever() -> None:

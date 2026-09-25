@@ -14,7 +14,7 @@ is reachable through the SSH tunnel only.
 
 Usage:
     python3 webcam_stream.py [--source webcam|robot] [--device PATH]
-                             [--width 640] [--height 360] [--fps 15] [--port 8090]
+                             [--width 640] [--height 360] [--fps 8] [--port 8090]
 """
 
 import argparse
@@ -60,13 +60,13 @@ def pipeline(source: str, device: str, width: int, height: int) -> list:
     return ["gst-launch-1.0", "-q", *head, "!", "multipartmux", "boundary=frame", "!", "fdsink", "fd=1"]
 
 
-def capture_loop(cmd: list, keep_every: int) -> None:
+def capture_loop(cmd: list, fps: float) -> None:
     """Read JPEG frames from GStreamer (multipartmux) and keep the latest one."""
     global latest_frame, frame_id
     while True:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
         out = proc.stdout
-        n = 0
+        last = 0.0
         try:
             while True:
                 line = out.readline()
@@ -78,9 +78,12 @@ def capture_loop(cmd: list, keep_every: int) -> None:
                 while out.readline() not in (b"\r\n", b"\n", b""):
                     pass
                 jpg = out.read(length)
-                n += 1
-                if n % keep_every:
+                # Publish at most `fps` frames per second: over the VPN the
+                # streams must leave room for the robot's control traffic.
+                now = time.monotonic()
+                if now - last < 1.0 / fps:
                     continue
+                last = now
                 with frame_cond:
                     latest_frame = jpg
                     frame_id += 1
@@ -149,16 +152,13 @@ def main() -> None:
     p.add_argument("--device")
     p.add_argument("--width", type=int, default=640)  # small frames: eduroam + VPN is slow
     p.add_argument("--height", type=int, default=360)
-    p.add_argument("--fps", type=int, default=15)
+    p.add_argument("--fps", type=float, default=8)
     p.add_argument("--port", type=int, default=8090)
     a = p.parse_args()
-    if a.source == "robot":
-        device, keep_every = ROBOT_CAMERA_SOCKET, 1  # the daemon's feed is already slow enough
-    else:
-        # UVC webcams usually only offer 30/60 fps, so capture at 30 and drop frames.
-        device, keep_every = a.device or find_device(), max(1, round(30 / a.fps))
+    # UVC webcams usually only offer 30/60 fps: capture at 30 and drop frames down to --fps.
+    device = ROBOT_CAMERA_SOCKET if a.source == "robot" else (a.device or find_device())
     cmd = pipeline(a.source, device, a.width, a.height)
-    threading.Thread(target=capture_loop, args=(cmd, keep_every), daemon=True).start()
+    threading.Thread(target=capture_loop, args=(cmd, a.fps), daemon=True).start()
     print(f"{a.source} {device} {a.width}x{a.height} on 127.0.0.1:{a.port}", flush=True)
     Server(("127.0.0.1", a.port), Handler).serve_forever()
 

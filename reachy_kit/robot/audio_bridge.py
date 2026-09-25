@@ -53,7 +53,8 @@ class MicHandler(http.server.BaseHTTPRequestHandler):
 
 class SpeakerHandler(socketserver.BaseRequestHandler):
     def handle(self) -> None:
-        proc = subprocess.Popen(SPEAKER_CMD, stdin=subprocess.PIPE)
+        # stderr off: aplay reports an "underrun" every time the stream pauses
+        proc = subprocess.Popen(SPEAKER_CMD, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
         try:
             while True:
                 data = self.request.recv(65536)
@@ -66,7 +67,7 @@ class SpeakerHandler(socketserver.BaseRequestHandler):
         finally:
             try:
                 proc.stdin.close()
-                proc.wait(timeout=2)
+                proc.wait(timeout=60)  # let queued audio finish playing
             except Exception:
                 proc.kill()
 
