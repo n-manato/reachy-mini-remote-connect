@@ -1,24 +1,24 @@
-"""Camera / microphone / speaker test through the SDK's WebRTC media.
+"""Camera / microphone / speaker test over the SSH tunnel (run reachy_tunnel.py first).
 
-Only works when this PC is on the robots' lab Wi-Fi: the SDK connects WebRTC to
-the robot's lab address and its UDP media does not pass the campus VPN.
-Over the VPN use the MJPEG streams (reachy_tunnel.py, ports 8090/8091) instead.
+Uses reachy_remote.connect(), so it works over the VPN only.
 
-- Camera: saves one frame to camera_test_<HOST>.jpg
-- Speaker (daemon API) -> mic: plays vpn_beep.wav (C5-E5-G5) and checks the mic hears it
-- Speaker (WebRTC push from PC) -> mic: streams a 440 Hz tone and checks the mic hears it
+- Camera: get_frame() + saves one frame to camera_test_<HOST>.jpg
+- Speaker (sound file via daemon API) -> mic: plays vpn_beep.wav (C5-E5-G5), checks the mic hears it
+- Speaker (push_audio_sample from PC) -> mic: streams a 440 Hz tone, checks the mic hears it
 """
 
+import io
 import sys
 import threading
 import time
+import wave
 
 import numpy as np
 import requests
 
-from reachy_mini import ReachyMini
+from reachy_remote import connect
 
-HOST = sys.argv[1] if len(sys.argv) > 1 else "localhost"  # 127.0.0.2 = mini-2, 127.0.0.3 = mini-3
+HOST = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"  # 127.0.0.2 = mini-2, 127.0.0.3 = mini-3
 
 BASE = f"http://{HOST}:8000/api"
 TEST_VOLUME = 60
@@ -51,10 +51,25 @@ def tone_energy(x: np.ndarray, sr: int, hz: float) -> float:
     return float(spec[near].max() / np.median(spec[band]))
 
 
+def beep_wav() -> bytes:
+    """C5-E5-G5, 0.25 s each."""
+    sr = 16000
+    t = np.arange(int(sr * 0.25)) / sr
+    pcm = (np.concatenate([np.sin(2 * np.pi * f * t) for f in (523, 659, 784)]) * 0.5 * 32767).astype(np.int16)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes(pcm.tobytes())
+    return buf.getvalue()
+
+
+requests.post(f"{BASE}/media/sounds/upload", files={"file": ("vpn_beep.wav", beep_wav(), "audio/wav")}, timeout=15)
 original = requests.get(f"{BASE}/volume/current", timeout=5).json()["volume"]
 requests.post(f"{BASE}/volume/set", json={"volume": TEST_VOLUME}, timeout=5)
 try:
-    with ReachyMini(host=HOST, connection_mode="network", timeout=15) as mini:
+    with connect(HOST) as mini:
         media = mini.media
 
         # --- camera
@@ -103,7 +118,7 @@ try:
         threading.Timer(0.3, push).start()
         rec2 = record(media, 2.2)
         media.stop_playing()
-        print(f"SPEAKER(WebRTC)->MIC: peak={peak_hz(rec2, sr_in):.0f}Hz, 440Hz score={tone_energy(rec2, sr_in, 440):.1f}x")
+        print(f"SPEAKER(push)->MIC: peak={peak_hz(rec2, sr_in):.0f}Hz, 440Hz score={tone_energy(rec2, sr_in, 440):.1f}x")
 
         media.stop_recording()
 finally:

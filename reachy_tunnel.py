@@ -11,13 +11,14 @@ Usage:
 robots.json (not committed, see robots.example.json) maps names to
 [robot IP, local address], e.g. {"mini-2": ["10.0.0.12", "127.0.0.2"]}.
 
-Keep it running, then connect with e.g.:
-    ReachyMini(host="127.0.0.2", connection_mode="network")
+Keep it running, then use the robot from code with reachy_remote.connect("127.0.0.2").
 
-It also starts two MJPEG streams on the robot (robot/webcam_stream.py):
-    http://<local address>:8090/   USB webcam watching the robot (if plugged in)
-    http://<local address>:8091/   the robot's own camera
-The SDK's WebRTC camera/audio does not work over the VPN; use reachy_remote.py.
+It also starts, on the robot (robot/*.py):
+    http://<local address>:8090/      USB webcam watching the robot (if plugged in)
+    http://<local address>:8091/      the robot's own camera
+    http://<local address>:8092/mic   robot microphone (raw PCM)
+    tcp <local address>:8093          robot speaker (raw PCM)
+because the SDK's WebRTC camera/audio (UDP) does not get through the VPN.
 """
 
 import getpass
@@ -37,29 +38,31 @@ logging.getLogger("paramiko.transport").setLevel(logging.CRITICAL)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROBOTS_PATH = os.path.join(HERE, "robots.json")
-WEBCAM_PORT = 8090        # USB webcam watching the robot
-ROBOT_CAMERA_PORT = 8091  # robot's own camera (WebRTC media does not pass the VPN)
-PORTS = [8000, 8443, WEBCAM_PORT, ROBOT_CAMERA_PORT]  # 8000 daemon API, 8443 WebRTC signaling
-STREAM_SCRIPT = os.path.join(HERE, "robot", "webcam_stream.py")
-REMOTE_STREAM_SCRIPT = "/home/pollen/webcam_stream.py"
+WEBCAM_PORT = 8090        # USB webcam watching the robot (MJPEG)
+ROBOT_CAMERA_PORT = 8091  # robot's own camera (MJPEG)
+MIC_PORT = 8092           # robot microphone (raw PCM over HTTP)
+SPEAKER_PORT = 8093       # robot speaker (raw PCM over TCP)
+# 8000 daemon API, 8443 WebRTC signaling (WebRTC media itself does not pass the VPN)
+PORTS = [8000, 8443, WEBCAM_PORT, ROBOT_CAMERA_PORT, MIC_PORT, SPEAKER_PORT]
+ROBOT_SCRIPTS = ["webcam_stream.py", "audio_bridge.py"]  # in robot/, uploaded to REMOTE_DIR
+REMOTE_DIR = "/home/pollen"
 
 
-def start_stream(client: paramiko.SSHClient, source: str, port: int, args: str = "") -> None:
-    """Start an MJPEG server on the robot unless one is already running on that port.
+def start_on_robot(client: paramiko.SSHClient, tag: str, command: str, match: str) -> None:
+    """Run `python3 <command>` on the robot unless a process matching `match` is running.
 
-    The server stops when the SSH session that started it closes. An already
+    The process stops when the SSH session that started it closes. An already
     running one (started by someone else's tunnel) is reused, not restarted,
-    so its resolution stays whatever the first user chose.
+    so e.g. a stream keeps the resolution the first user chose.
     """
-    tag = f"[{source} stream]"
     # "[p]ython3" so the pattern does not match the shell running pgrep itself
-    _, out, _ = client.exec_command(f"pgrep -f '[p]ython3 .*webcam_stream.py --port {port}'")
+    _, out, _ = client.exec_command(f"pgrep -f '[p]ython3 {REMOTE_DIR}/{match}'")
     if out.read().strip():
         print(f"{tag} already running, reusing it", flush=True)
         return
     chan = client.get_transport().open_session()
     chan.get_pty()  # closing the session then kills the remote process
-    chan.exec_command(f"python3 {REMOTE_STREAM_SCRIPT} --port {port} --source {source} {args}".strip())
+    chan.exec_command(f"python3 {REMOTE_DIR}/{command}")
 
     def relay() -> None:
         for line in iter(chan.makefile("r").readline, ""):
@@ -68,14 +71,18 @@ def start_stream(client: paramiko.SSHClient, source: str, port: int, args: str =
     threading.Thread(target=relay, daemon=True).start()
 
 
-def start_streams(client: paramiko.SSHClient, webcam_args: str = "") -> None:
-    """Upload webcam_stream.py and start the webcam and robot-camera streams."""
+def start_robot_services(client: paramiko.SSHClient, webcam_args: str = "") -> None:
+    """Upload the robot/ scripts and start the camera streams and the audio bridge."""
     sftp = client.open_sftp()
-    with open(STREAM_SCRIPT, "rb") as f:
-        sftp.putfo(f, REMOTE_STREAM_SCRIPT)
+    for name in ROBOT_SCRIPTS:
+        with open(os.path.join(HERE, "robot", name), "rb") as f:
+            sftp.putfo(f, f"{REMOTE_DIR}/{name}")
     sftp.close()
-    start_stream(client, "webcam", WEBCAM_PORT, webcam_args)
-    start_stream(client, "robot", ROBOT_CAMERA_PORT, webcam_args)
+    for source, port in (("webcam", WEBCAM_PORT), ("robot", ROBOT_CAMERA_PORT)):
+        start_on_robot(client, f"[{source} stream]",
+                       f"webcam_stream.py --port {port} --source {source} {webcam_args}".strip(),
+                       match=f"webcam_stream.py --port {port} ")
+    start_on_robot(client, "[audio]", "audio_bridge.py", match="audio_bridge.py")
 
 
 def make_handler(transport: paramiko.Transport, remote_port: int) -> type:
@@ -142,7 +149,7 @@ def open_tunnel(robot_ip: str, password: str, local_addr: str = "127.0.0.1",
                    allow_agent=False, look_for_keys=False)
     transport = client.get_transport()
     transport.set_keepalive(30)
-    start_streams(client, webcam_args)
+    start_robot_services(client, webcam_args)
 
     listen = [(ThreadedServer, local_addr)]
     if local_addr == "127.0.0.1":

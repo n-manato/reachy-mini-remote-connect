@@ -4,10 +4,11 @@ GlobalProtect must be connected (on or off campus): it routes the robots'
 eduroam addresses into the VPN, and eduroam itself blocks client-to-client.
 
 1. Reads the robot from robot_config.json
-2. Opens an SSH tunnel (port 8000/8443/8090 -> 127.0.0.1)
+2. Opens an SSH tunnel (ports 8000, 8443, 8090-8093 -> 127.0.0.1)
 3. Wakes the robot up (head up + start-up sound)
-4. Opens a browser page with the robot camera and the USB webcam
-   (the webcam panel shows "Not connected" when there is none)
+4. Opens a browser page with the robot camera, the USB webcam (a panel shows
+   "Not connected" when its camera is missing) and a button to listen to the
+   robot microphone
 5. On Ctrl+C or the "Quit" button: robot goes to sleep, everything closes
 
 Usage:
@@ -27,7 +28,7 @@ import threading
 import urllib.request
 import webbrowser
 
-from reachy_tunnel import ROBOT_CAMERA_PORT, WEBCAM_PORT, close_tunnel, open_tunnel
+from reachy_tunnel import MIC_PORT, ROBOT_CAMERA_PORT, WEBCAM_PORT, close_tunnel, open_tunnel
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "robot_config.json")
@@ -36,6 +37,7 @@ STREAMS = {  # panel id -> MJPEG server on the robot, reached through the tunnel
     "robot": f"http://{LOCAL}:{ROBOT_CAMERA_PORT}",
     "webcam": f"http://{LOCAL}:{WEBCAM_PORT}",
 }
+MIC_URL = f"http://{LOCAL}:{MIC_PORT}/mic"  # raw PCM s16le, 16 kHz, 2 ch
 
 PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>{name}</title>
 <style>
@@ -47,7 +49,8 @@ section{{flex:1 1 480px;min-width:0}} h2{{font-size:15px;margin:6px 0}}
 .view img{{width:100%;height:100%;object-fit:contain}} .nc{{color:#888;font-size:20px}}
 button{{font-size:14px;padding:6px 16px}}
 </style></head><body>
-<header><div><b>{name}</b> ({ip})</div><div id="state"></div><button id="quit">Quit (robot goes to sleep)</button></header>
+<header><div><b>{name}</b> ({ip})</div><div id="state"></div>
+<div><button id="listen">Listen to robot mic</button> <button id="quit">Quit (robot goes to sleep)</button></div></header>
 <main>
 <section><h2>Robot camera</h2><div class="view" id="robot"><span class="nc">Not connected</span></div></section>
 <section><h2>Webcam</h2><div class="view" id="webcam"><span class="nc">Not connected</span></div></section>
@@ -65,6 +68,40 @@ async function poll() {{
   }} catch (e) {{ document.getElementById('state').textContent = 'disconnected'; }}
 }}
 poll(); setInterval(poll, 5000);
+
+// Robot microphone: raw PCM (s16le, 16 kHz, stereo) through the tunnel, played with Web Audio.
+let mic = null;
+document.getElementById('listen').onclick = async (ev) => {{
+  const btn = ev.target;
+  if (mic) {{ mic.abort.abort(); mic.ctx.close(); mic = null; btn.textContent = 'Listen to robot mic'; return; }}
+  const ctx = new AudioContext({{sampleRate: 16000}});
+  const abort = new AbortController();
+  mic = {{ctx, abort}};
+  btn.textContent = 'Stop listening';
+  let next = 0, rest = new Uint8Array(0);
+  try {{
+    const reader = (await fetch('{mic_url}', {{signal: abort.signal}})).body.getReader();
+    for (;;) {{
+      const {{value, done}} = await reader.read();
+      if (done) break;
+      const buf = new Uint8Array(rest.length + value.length);
+      buf.set(rest); buf.set(value, rest.length);
+      const usable = buf.length - buf.length % 4;
+      rest = buf.slice(usable);
+      const pcm = new Int16Array(buf.buffer, 0, usable / 2);
+      const n = pcm.length / 2;
+      if (!n) continue;
+      const ab = ctx.createBuffer(1, n, 16000), ch = ab.getChannelData(0);
+      for (let i = 0; i < n; i++) ch[i] = (pcm[2 * i] + pcm[2 * i + 1]) / 65536;
+      const src = ctx.createBufferSource();
+      src.buffer = ab; src.connect(ctx.destination);
+      const now = ctx.currentTime;
+      if (next < now || next > now + 0.5) next = now + 0.1;  // resync, keep latency low
+      src.start(next); next += ab.duration;
+    }}
+  }} catch (e) {{ if (mic) btn.textContent = 'Listen to robot mic'; mic = null; }}
+}};
+
 document.getElementById('quit').onclick = async () => {{
   await fetch('/quit', {{method: 'POST'}}).catch(() => {{}});
   document.body.innerHTML = '<p style="padding:16px">Stopped. You can close this tab.</p>';
@@ -154,7 +191,7 @@ def make_viewer(cfg: dict, stop: threading.Event) -> http.server.ThreadingHTTPSe
             stop.wait(5)
 
     threading.Thread(target=watch_streams, daemon=True).start()
-    page = PAGE.format(name=cfg["name"], ip=cfg["ip"], urls=json.dumps(STREAMS)).encode()
+    page = PAGE.format(name=cfg["name"], ip=cfg["ip"], urls=json.dumps(STREAMS), mic_url=MIC_URL).encode()
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *args) -> None:
@@ -200,7 +237,7 @@ def main() -> None:
                                       f"--width {int(w['width'])} --height {int(w['height'])} --fps {int(w['fps'])}")
     except OSError as e:
         if getattr(e, "winerror", None) == 10048 or "address already in use" in str(e).lower():
-            fail("Port 8000/8443/8090/8091 is already in use. Is another tunnel or reachy_connect running?")
+            fail("Port 8000/8443/8090-8093 is already in use. Is another tunnel or reachy_connect running?")
         fail(f"SSH connection failed: {e}")
     except Exception as e:
         fail(f"SSH connection failed: {e}")

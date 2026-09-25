@@ -14,13 +14,27 @@ an SSH tunnel to `127.0.0.1`:
 
 | Port | What |
 |---|---|
-| 8000 | robot daemon API (motion, sound, volume) |
+| 8000 | robot daemon API (motion, sound files, volume) |
 | 8090 | webcam MJPEG stream (`http://127.0.0.1:8090/`) |
 | 8091 | robot camera MJPEG stream (`http://127.0.0.1:8091/`) |
+| 8092 | robot microphone, raw PCM 16 kHz stereo (`http://127.0.0.1:8092/mic`) |
+| 8093 | robot speaker, raw PCM 16 kHz stereo (TCP) |
 | 8443 | WebRTC signaling (only useful on the lab Wi-Fi) |
 
-The SDK's own camera/audio (WebRTC) does **not** work over the VPN, so the robot camera is
-streamed as MJPEG through the tunnel and sounds are played through the daemon API.
+The SDK's own camera/audio (WebRTC, UDP) does **not** get through the VPN, so camera, microphone
+and speaker are carried through the tunnel by small helpers on the robot (`robot/*.py`), and
+`reachy_remote.py` offers them with the same calls as the SDK.
+
+Everything works over the VPN alone:
+
+| Feature | Browser page (`run.bat`) | Your code (`reachy_remote`) |
+|---|---|---|
+| Motion (head, antennas, body) | wake up / sleep | `mini.goto_target(...)`, `wake_up()`, … |
+| Robot camera | live view | `mini.media.get_frame()` / `get_frame_jpeg()` |
+| Webcam watching the robot | live view | `http://127.0.0.1:8090/snapshot.jpg` |
+| Robot microphone | **Listen to robot mic** button | `start_recording()` / `get_audio_sample()` |
+| Robot speaker (stream) | – | `start_playing()` / `push_audio_sample()` |
+| Robot speaker (sound files) | start-up / sleep sounds | `play_sound("wake_up.wav")` |
 
 ## Files
 
@@ -28,7 +42,8 @@ streamed as MJPEG through the tunnel and sounds are played through the daemon AP
 reachy_connect.py            main script (run.bat)
 reachy_remote.py             use the SDK over the tunnel from your own code
 reachy_tunnel.py             SSH tunnel to the robot (also usable on its own)
-robot/webcam_stream.py       webcam / robot-camera MJPEG stream, uploaded to the robot automatically
+robot/webcam_stream.py       webcam / robot-camera MJPEG stream   } uploaded to the robot
+robot/audio_bridge.py        robot microphone / speaker over TCP  } automatically
 robot_config.example.json    template for robot_config.json
 requirements.txt             Python packages
 setup.bat / run.bat          one-time setup / start
@@ -116,19 +131,33 @@ instead of `ReachyMini(...)` directly: a plain `ReachyMini` tries WebRTC and han
 and `media_backend="no_media"` makes the daemon release the camera, which stops the camera stream.
 
 ```python
-import urllib.request
-from reachy_remote import connect, play_sound
+import time
+import numpy as np
+from reachy_remote import connect
 from reachy_mini.utils import create_head_pose
 
-with connect() as mini:                       # 127.0.0.1
-    mini.enable_motors()                       # motors are off after a robot reboot
+with connect() as mini:                            # 127.0.0.1
+    mini.enable_motors()                            # motors are off after a robot reboot
     mini.goto_target(head=create_head_pose(pitch=15), duration=1.0)
-    play_sound("127.0.0.1", "dance1.wav")      # built-in sound on the robot speaker
-    jpg = urllib.request.urlopen("http://127.0.0.1:8091/snapshot.jpg").read()  # robot camera
+
+    frame = mini.media.get_frame()                  # robot camera, BGR numpy array
+
+    mini.media.play_sound("dance1.wav")             # built-in sound file
+
+    mini.media.start_recording()                    # robot microphone
+    time.sleep(1)
+    chunk = mini.media.get_audio_sample()           # float32 (n, 2) at 16 kHz, or None
+    mini.media.stop_recording()
+
+    mini.media.start_playing()                      # stream audio to the robot speaker
+    t = np.arange(16000) / 16000
+    mini.media.push_audio_sample((0.3 * np.sin(2 * np.pi * 440 * t)).astype(np.float32))
+    mini.media.stop_playing()
 ```
 
-Run it with `.venv\Scripts\python.exe your_script.py`. The SDK's `mini.media` camera / microphone
-functions do not work over the VPN.
+Run it with `.venv\Scripts\python.exe your_script.py`. `mini.media` is `reachy_remote.TunnelMedia`;
+SDK media features beyond these (face tracking, direction of arrival, speech wobbling) are not
+available over the VPN.
 
 ## Rules
 
@@ -141,7 +170,7 @@ functions do not work over the VPN.
 |---|---|
 | `Traffic to the robot is not going through GlobalProtect.` | Connect GlobalProtect and run again. |
 | `Cannot reach the robot (…:22)` | Check that GlobalProtect is connected and the robot is powered on. The robot's IP may have changed; ask the robot admin for the new one and update `ip`. |
-| `Port 8000/8443/8090/8091 is already in use` | Another `run.bat` (or tunnel) is still running on this PC. Close it first. |
+| `Port 8000/8443/8090-8093 is already in use` | Another `run.bat` (or tunnel) is still running on this PC. Close it first. |
 | `SSH connection failed` | Wrong `ssh_user` / `ssh_password`, or the robot is still booting. |
 | No start-up sound | Check `volume` in `robot_config.json` (100 = loudest). |
 | Video is slow or choppy | Lower `webcam` resolution/fps. Everything goes through the VPN, which is slow. |
@@ -158,6 +187,6 @@ account may not be allowed to reach the robots; contact the robot admin.
 - **eduroam setup:** `setup_eduroam.py` configures a robot's USB Wi-Fi adapter for eduroam
   (PEAP/MSCHAPv2), makes it the default route, and installs `robot/60-eduroam-policy-route`.
   Credentials are read from environment variables only; see the script's docstring.
-- **Checks:** `test_motion.py`, `test_camera.py`, `test_speaker.py` take the local tunnel address
-  as an argument, e.g. `python test_motion.py 127.0.0.2`. `test_media.py` uses the SDK's WebRTC
-  camera/mic and only works when the PC is on the robots' lab Wi-Fi.
+- **Checks:** `test_motion.py`, `test_camera.py`, `test_media.py` (camera + mic + speaker loopback),
+  `test_speaker.py` take the local tunnel address as an argument, e.g. `python test_motion.py 127.0.0.2`.
+  All of them work over the VPN.
