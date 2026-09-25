@@ -20,25 +20,22 @@ name, IP and SSH login (ask the robot admin).
 import http.server
 import ipaddress
 import json
-import logging
 import os
 import socket
 import sys
 import threading
-import time
 import urllib.request
 import webbrowser
 
-from reachy_tunnel import close_tunnel, open_tunnel
+from reachy_tunnel import ROBOT_CAMERA_PORT, WEBCAM_PORT, close_tunnel, open_tunnel
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "robot_config.json")
 LOCAL = "127.0.0.1"
-WEBCAM_URL = f"http://{LOCAL}:8090"
-ROBOT_FPS = 15
-
-# The SDK looks for a local Reachy audio device, which this PC never has.
-logging.getLogger("reachy_mini.media.audio_control_utils").setLevel(logging.CRITICAL)
+STREAMS = {  # panel id -> MJPEG server on the robot, reached through the tunnel
+    "robot": f"http://{LOCAL}:{ROBOT_CAMERA_PORT}",
+    "webcam": f"http://{LOCAL}:{WEBCAM_PORT}",
+}
 
 PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>{name}</title>
 <style>
@@ -52,16 +49,19 @@ button{{font-size:14px;padding:6px 16px}}
 </style></head><body>
 <header><div><b>{name}</b> ({ip})</div><div id="state"></div><button id="quit">Quit (robot goes to sleep)</button></header>
 <main>
-<section><h2>Robot camera</h2><div class="view"><img src="/robot.mjpg"></div></section>
-<section><h2>Webcam</h2><div class="view" id="web"><span class="nc">Not connected</span></div></section>
+<section><h2>Robot camera</h2><div class="view" id="robot"><span class="nc">Not connected</span></div></section>
+<section><h2>Webcam</h2><div class="view" id="webcam"><span class="nc">Not connected</span></div></section>
 </main>
 <script>
-let webOn = false;
+const urls = {urls};
+const on = {{}};
 async function poll() {{
   try {{
     const s = await (await fetch('/status')).json();
-    if (s.webcam && !webOn) {{ document.getElementById('web').innerHTML = '<img src="{webcam}/stream">'; webOn = true; }}
-    if (!s.webcam && webOn) {{ document.getElementById('web').innerHTML = '<span class="nc">Not connected</span>'; webOn = false; }}
+    for (const id in urls) {{
+      if (s[id] && !on[id]) {{ document.getElementById(id).innerHTML = '<img src="' + urls[id] + '/stream">'; on[id] = true; }}
+      if (!s[id] && on[id]) {{ document.getElementById(id).innerHTML = '<span class="nc">Not connected</span>'; on[id] = false; }}
+    }}
   }} catch (e) {{ document.getElementById('state').textContent = 'disconnected'; }}
 }}
 poll(); setInterval(poll, 5000);
@@ -136,24 +136,25 @@ def preflight(ip: str, isolated_subnet: str = "") -> None:
              "        - The robot's eduroam IP may have changed (update robot_config.json).")
 
 
-def webcam_available() -> bool:
+def stream_available(url: str) -> bool:
     try:
-        with urllib.request.urlopen(f"{WEBCAM_URL}/snapshot.jpg", timeout=6) as r:
+        with urllib.request.urlopen(f"{url}/snapshot.jpg", timeout=6) as r:
             return r.status == 200
     except OSError:
         return False
 
 
-def make_viewer(mini, cfg: dict, stop: threading.Event) -> http.server.ThreadingHTTPServer:
-    status = {"webcam": False}
+def make_viewer(cfg: dict, stop: threading.Event) -> http.server.ThreadingHTTPServer:
+    status = {name: False for name in STREAMS}
 
-    def watch_webcam() -> None:
+    def watch_streams() -> None:
         while not stop.is_set():
-            status["webcam"] = webcam_available()
+            for name, url in STREAMS.items():
+                status[name] = stream_available(url)
             stop.wait(5)
 
-    threading.Thread(target=watch_webcam, daemon=True).start()
-    page = PAGE.format(name=cfg["name"], ip=cfg["ip"], webcam=WEBCAM_URL).encode()
+    threading.Thread(target=watch_streams, daemon=True).start()
+    page = PAGE.format(name=cfg["name"], ip=cfg["ip"], urls=json.dumps(STREAMS)).encode()
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *args) -> None:
@@ -171,21 +172,6 @@ def make_viewer(mini, cfg: dict, stop: threading.Event) -> http.server.Threading
                 self._send(200, "text/html; charset=utf-8", page)
             elif self.path == "/status":
                 self._send(200, "application/json", json.dumps(status).encode())
-            elif self.path == "/robot.mjpg":
-                self.send_response(200)
-                self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
-                self.send_header("Cache-Control", "no-cache")
-                self.end_headers()
-                try:
-                    while not stop.is_set():
-                        jpg = mini.media.get_frame_jpeg()
-                        if jpg:
-                            self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\n")
-                            self.wfile.write(f"Content-Length: {len(jpg)}\r\n\r\n".encode())
-                            self.wfile.write(jpg + b"\r\n")
-                        time.sleep(1 / ROBOT_FPS)
-                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-                    pass
             else:
                 self._send(404, "text/plain", b"not found")
 
@@ -214,24 +200,24 @@ def main() -> None:
                                       f"--width {int(w['width'])} --height {int(w['height'])} --fps {int(w['fps'])}")
     except OSError as e:
         if getattr(e, "winerror", None) == 10048 or "address already in use" in str(e).lower():
-            fail("Port 8000/8443/8090 is already in use. Is another tunnel or reachy_connect running?")
+            fail("Port 8000/8443/8090/8091 is already in use. Is another tunnel or reachy_connect running?")
         fail(f"SSH connection failed: {e}")
     except Exception as e:
         fail(f"SSH connection failed: {e}")
 
     # Imported late: loading the SDK takes a few seconds.
-    from reachy_mini import ReachyMini
+    from reachy_remote import connect
 
     stop = threading.Event()
     viewer = None
     try:
-        with ReachyMini(host=LOCAL, connection_mode="network", timeout=15) as mini:
+        with connect(LOCAL) as mini:
             print("Waking up the robot...")
             set_volume(cfg["volume"])
             mini.enable_motors()  # motors come up disabled after a robot reboot
-            mini.wake_up()
+            mini.wake_up()  # head up + start-up sound (played through the daemon API)
 
-            viewer = make_viewer(mini, cfg, stop)
+            viewer = make_viewer(cfg, stop)
             url = f"http://{LOCAL}:{viewer.server_address[1]}/"
             print(f"Viewer: {url}")
             webbrowser.open(url)

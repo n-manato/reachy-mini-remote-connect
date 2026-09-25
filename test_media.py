@@ -1,4 +1,8 @@
-"""Camera / microphone / speaker test over the SSH tunnel (run reachy_tunnel.py first).
+"""Camera / microphone / speaker test through the SDK's WebRTC media.
+
+Only works when this PC is on the robots' lab Wi-Fi: the SDK connects WebRTC to
+the robot's lab address and its UDP media does not pass the campus VPN.
+Over the VPN use the MJPEG streams (reachy_tunnel.py, ports 8090/8091) instead.
 
 - Camera: saves one frame to camera_test_<HOST>.jpg
 - Speaker (daemon API) -> mic: plays vpn_beep.wav (C5-E5-G5) and checks the mic hears it

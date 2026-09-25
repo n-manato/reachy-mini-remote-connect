@@ -10,14 +10,25 @@ One run of `run.bat`:
 
 How it works: the robots sit on the campus Wi-Fi with a USB Wi-Fi adapter. The campus network
 blocks the robot's API ports from the VPN but allows SSH, so the scripts reach the robot through
-an SSH tunnel (ports 8000 / 8443 / 8090 are forwarded to `127.0.0.1`).
+an SSH tunnel to `127.0.0.1`:
+
+| Port | What |
+|---|---|
+| 8000 | robot daemon API (motion, sound, volume) |
+| 8090 | webcam MJPEG stream (`http://127.0.0.1:8090/`) |
+| 8091 | robot camera MJPEG stream (`http://127.0.0.1:8091/`) |
+| 8443 | WebRTC signaling (only useful on the lab Wi-Fi) |
+
+The SDK's own camera/audio (WebRTC) does **not** work over the VPN, so the robot camera is
+streamed as MJPEG through the tunnel and sounds are played through the daemon API.
 
 ## Files
 
 ```
 reachy_connect.py            main script (run.bat)
+reachy_remote.py             use the SDK over the tunnel from your own code
 reachy_tunnel.py             SSH tunnel to the robot (also usable on its own)
-robot/webcam_stream.py       webcam MJPEG stream, uploaded to the robot automatically
+robot/webcam_stream.py       webcam / robot-camera MJPEG stream, uploaded to the robot automatically
 robot_config.example.json    template for robot_config.json
 requirements.txt             Python packages
 setup.bat / run.bat          one-time setup / start
@@ -100,17 +111,24 @@ test_*.py                    motion / camera / mic / speaker checks through the 
 
 ### Using the robot from your own code
 
-While `run.bat` is running, the robot is available on `127.0.0.1`:
+While `run.bat` is running, the robot is available on `127.0.0.1`. Use `reachy_remote.connect()`
+instead of `ReachyMini(...)` directly: a plain `ReachyMini` tries WebRTC and hangs over the VPN,
+and `media_backend="no_media"` makes the daemon release the camera, which stops the camera stream.
 
 ```python
-from reachy_mini import ReachyMini
+import urllib.request
+from reachy_remote import connect, play_sound
+from reachy_mini.utils import create_head_pose
 
-with ReachyMini(host="127.0.0.1", connection_mode="network") as mini:
-    mini.enable_motors()   # motors are off after a robot reboot
-    ...
+with connect() as mini:                       # 127.0.0.1
+    mini.enable_motors()                       # motors are off after a robot reboot
+    mini.goto_target(head=create_head_pose(pitch=15), duration=1.0)
+    play_sound("127.0.0.1", "dance1.wav")      # built-in sound on the robot speaker
+    jpg = urllib.request.urlopen("http://127.0.0.1:8091/snapshot.jpg").read()  # robot camera
 ```
 
-Run it with `.venv\Scripts\python.exe your_script.py`.
+Run it with `.venv\Scripts\python.exe your_script.py`. The SDK's `mini.media` camera / microphone
+functions do not work over the VPN.
 
 ## Rules
 
@@ -123,7 +141,7 @@ Run it with `.venv\Scripts\python.exe your_script.py`.
 |---|---|
 | `Traffic to the robot is not going through GlobalProtect.` | Connect GlobalProtect and run again. |
 | `Cannot reach the robot (…:22)` | Check that GlobalProtect is connected and the robot is powered on. The robot's IP may have changed; ask the robot admin for the new one and update `ip`. |
-| `Port 8000/8443/8090 is already in use` | Another `run.bat` (or tunnel) is still running on this PC. Close it first. |
+| `Port 8000/8443/8090/8091 is already in use` | Another `run.bat` (or tunnel) is still running on this PC. Close it first. |
 | `SSH connection failed` | Wrong `ssh_user` / `ssh_password`, or the robot is still booting. |
 | No start-up sound | Check `volume` in `robot_config.json` (100 = loudest). |
 | Video is slow or choppy | Lower `webcam` resolution/fps. Everything goes through the VPN, which is slow. |
@@ -140,5 +158,6 @@ account may not be allowed to reach the robots; contact the robot admin.
 - **eduroam setup:** `setup_eduroam.py` configures a robot's USB Wi-Fi adapter for eduroam
   (PEAP/MSCHAPv2), makes it the default route, and installs `robot/60-eduroam-policy-route`.
   Credentials are read from environment variables only; see the script's docstring.
-- **Checks:** `test_motion.py`, `test_media.py`, `test_camera.py`, `test_speaker.py` take the local
-  tunnel address as an argument, e.g. `python test_motion.py 127.0.0.2`.
+- **Checks:** `test_motion.py`, `test_camera.py`, `test_speaker.py` take the local tunnel address
+  as an argument, e.g. `python test_motion.py 127.0.0.2`. `test_media.py` uses the SDK's WebRTC
+  camera/mic and only works when the PC is on the robots' lab Wi-Fi.

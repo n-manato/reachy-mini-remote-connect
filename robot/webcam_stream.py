@@ -1,4 +1,9 @@
-"""MJPEG stream of a USB webcam, served on the robot (runs on Reachy Mini).
+"""MJPEG stream of a camera, served on the robot (runs on Reachy Mini).
+
+--source webcam   a USB webcam watching the robot (default)
+--source robot    the robot's own camera, read from the daemon's local IPC
+                  socket, so it works without WebRTC (whose UDP media does
+                  not get through the campus VPN)
 
 Started automatically by reachy_tunnel.py. Only listens on 127.0.0.1, so it
 is reachable through the SSH tunnel only.
@@ -8,7 +13,8 @@ is reachable through the SSH tunnel only.
     GET /snapshot.jpg   single JPEG
 
 Usage:
-    python3 webcam_stream.py [--device PATH] [--width 640] [--height 360] [--fps 15] [--port 8090]
+    python3 webcam_stream.py [--source webcam|robot] [--device PATH]
+                             [--width 640] [--height 360] [--fps 15] [--port 8090]
 """
 
 import argparse
@@ -39,16 +45,24 @@ def find_device() -> str:
     sys.exit("no USB webcam found under /dev/v4l/by-id")
 
 
-def capture_loop(device: str, width: int, height: int, fps: int) -> None:
+ROBOT_CAMERA_SOCKET = "/tmp/reachymini_camera_socket"  # served by the Reachy Mini daemon
+
+
+def pipeline(source: str, device: str, width: int, height: int) -> list:
+    """gst-launch command that writes multipart JPEG frames to stdout."""
+    if source == "robot":
+        head = ["unixfdsrc", f"socket-path={ROBOT_CAMERA_SOCKET}", "!", "queue", "!",
+                "v4l2convert", "!", f"video/x-raw,format=I420,width={width},height={height}", "!",
+                "jpegenc", "quality=70"]
+    else:
+        head = ["v4l2src", f"device={device}", "!",
+                f"image/jpeg,width={width},height={height},framerate=30/1"]
+    return ["gst-launch-1.0", "-q", *head, "!", "multipartmux", "boundary=frame", "!", "fdsink", "fd=1"]
+
+
+def capture_loop(cmd: list, keep_every: int) -> None:
     """Read JPEG frames from GStreamer (multipartmux) and keep the latest one."""
     global latest_frame, frame_id
-    # UVC webcams usually only offer 30/60 fps, so capture at 30 and drop frames.
-    keep_every = max(1, round(30 / fps))
-    cmd = [
-        "gst-launch-1.0", "-q", "v4l2src", f"device={device}", "!",
-        f"image/jpeg,width={width},height={height},framerate=30/1", "!",
-        "multipartmux", "boundary=frame", "!", "fdsink", "fd=1",
-    ]
     while True:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
         out = proc.stdout
@@ -128,15 +142,21 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 def main() -> None:
     p = argparse.ArgumentParser()
+    p.add_argument("--source", choices=["webcam", "robot"], default="webcam")
     p.add_argument("--device")
     p.add_argument("--width", type=int, default=640)  # small frames: eduroam + VPN is slow
     p.add_argument("--height", type=int, default=360)
     p.add_argument("--fps", type=int, default=15)
     p.add_argument("--port", type=int, default=8090)
     a = p.parse_args()
-    device = a.device or find_device()
-    threading.Thread(target=capture_loop, args=(device, a.width, a.height, a.fps), daemon=True).start()
-    print(f"webcam {device} {a.width}x{a.height}@{a.fps} on 127.0.0.1:{a.port}", flush=True)
+    if a.source == "robot":
+        device, keep_every = ROBOT_CAMERA_SOCKET, 1  # the daemon's feed is already slow enough
+    else:
+        # UVC webcams usually only offer 30/60 fps, so capture at 30 and drop frames.
+        device, keep_every = a.device or find_device(), max(1, round(30 / a.fps))
+    cmd = pipeline(a.source, device, a.width, a.height)
+    threading.Thread(target=capture_loop, args=(cmd, keep_every), daemon=True).start()
+    print(f"{a.source} {device} {a.width}x{a.height} on 127.0.0.1:{a.port}", flush=True)
     Server(("127.0.0.1", a.port), Handler).serve_forever()
 
 

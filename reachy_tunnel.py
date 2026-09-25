@@ -14,8 +14,10 @@ robots.json (not committed, see robots.example.json) maps names to
 Keep it running, then connect with e.g.:
     ReachyMini(host="127.0.0.2", connection_mode="network")
 
-It also starts robot/webcam_stream.py on the robot (if a USB webcam is
-plugged in); open http://<local address>:8090 to watch the robot.
+It also starts two MJPEG streams on the robot (robot/webcam_stream.py):
+    http://<local address>:8090/   USB webcam watching the robot (if plugged in)
+    http://<local address>:8091/   the robot's own camera
+The SDK's WebRTC camera/audio does not work over the VPN; use reachy_remote.py.
 """
 
 import getpass
@@ -35,35 +37,45 @@ logging.getLogger("paramiko.transport").setLevel(logging.CRITICAL)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROBOTS_PATH = os.path.join(HERE, "robots.json")
-PORTS = [8000, 8443, 8090]  # daemon API / WebRTC signaling / webcam stream
-WEBCAM_SCRIPT = os.path.join(HERE, "robot", "webcam_stream.py")
-REMOTE_WEBCAM_SCRIPT = "/home/pollen/webcam_stream.py"
+WEBCAM_PORT = 8090        # USB webcam watching the robot
+ROBOT_CAMERA_PORT = 8091  # robot's own camera (WebRTC media does not pass the VPN)
+PORTS = [8000, 8443, WEBCAM_PORT, ROBOT_CAMERA_PORT]  # 8000 daemon API, 8443 WebRTC signaling
+STREAM_SCRIPT = os.path.join(HERE, "robot", "webcam_stream.py")
+REMOTE_STREAM_SCRIPT = "/home/pollen/webcam_stream.py"
 
 
-def start_webcam_stream(client: paramiko.SSHClient, args: str = "") -> None:
-    """Start the webcam MJPEG server on the robot unless one is already running.
+def start_stream(client: paramiko.SSHClient, source: str, port: int, args: str = "") -> None:
+    """Start an MJPEG server on the robot unless one is already running on that port.
 
     The server stops when the SSH session that started it closes. An already
     running one (started by someone else's tunnel) is reused, not restarted,
     so its resolution stays whatever the first user chose.
     """
+    tag = f"[{source} stream]"
     # "[p]ython3" so the pattern does not match the shell running pgrep itself
-    _, out, _ = client.exec_command("pgrep -f '[p]ython3 .*webcam_stream.py'")
+    _, out, _ = client.exec_command(f"pgrep -f '[p]ython3 .*webcam_stream.py --port {port}'")
     if out.read().strip():
-        print("[robot webcam] already running, reusing it", flush=True)
+        print(f"{tag} already running, reusing it", flush=True)
         return
-    sftp = client.open_sftp()
-    sftp.put(WEBCAM_SCRIPT, REMOTE_WEBCAM_SCRIPT)
-    sftp.close()
     chan = client.get_transport().open_session()
     chan.get_pty()  # closing the session then kills the remote process
-    chan.exec_command(f"python3 {REMOTE_WEBCAM_SCRIPT} {args}".strip())
+    chan.exec_command(f"python3 {REMOTE_STREAM_SCRIPT} --port {port} --source {source} {args}".strip())
 
     def relay() -> None:
         for line in iter(chan.makefile("r").readline, ""):
-            print(f"[robot webcam] {line.rstrip()}", flush=True)
+            print(f"{tag} {line.rstrip()}", flush=True)
 
     threading.Thread(target=relay, daemon=True).start()
+
+
+def start_streams(client: paramiko.SSHClient, webcam_args: str = "") -> None:
+    """Upload webcam_stream.py and start the webcam and robot-camera streams."""
+    sftp = client.open_sftp()
+    with open(STREAM_SCRIPT, "rb") as f:
+        sftp.putfo(f, REMOTE_STREAM_SCRIPT)
+    sftp.close()
+    start_stream(client, "webcam", WEBCAM_PORT, webcam_args)
+    start_stream(client, "robot", ROBOT_CAMERA_PORT, webcam_args)
 
 
 def make_handler(transport: paramiko.Transport, remote_port: int) -> type:
@@ -121,7 +133,8 @@ def open_tunnel(robot_ip: str, password: str, local_addr: str = "127.0.0.1",
                  user: str = "pollen", webcam_args: str = "") -> tuple[paramiko.SSHClient, list]:
     """SSH to the robot, start the webcam stream and forward PORTS to local_addr.
 
-    webcam_args is passed to robot/webcam_stream.py, e.g. "--width 640 --height 360 --fps 15".
+    webcam_args is passed to both robot/webcam_stream.py instances (webcam and
+    robot camera), e.g. "--width 640 --height 360 --fps 15".
     """
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -129,7 +142,7 @@ def open_tunnel(robot_ip: str, password: str, local_addr: str = "127.0.0.1",
                    allow_agent=False, look_for_keys=False)
     transport = client.get_transport()
     transport.set_keepalive(30)
-    start_webcam_stream(client, webcam_args)
+    start_streams(client, webcam_args)
 
     listen = [(ThreadedServer, local_addr)]
     if local_addr == "127.0.0.1":

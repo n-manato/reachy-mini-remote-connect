@@ -8,7 +8,9 @@ import numpy as np
 from reachy_mini import ReachyMini
 from reachy_mini.utils import create_head_pose
 
-HOST = sys.argv[1] if len(sys.argv) > 1 else "localhost"  # 127.0.0.2 = mini-2, 127.0.0.3 = mini-3
+from reachy_remote import connect
+
+HOST = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"  # 127.0.0.2 = mini-2, 127.0.0.3 = mini-3
 
 
 def show(mini: ReachyMini, label: str) -> None:
@@ -17,7 +19,7 @@ def show(mini: ReachyMini, label: str) -> None:
     print(f"{label:12s} head_z={head[2, 3] * 1000:6.1f}mm antennas=({ant[0]:+.2f}, {ant[1]:+.2f})")
 
 
-with ReachyMini(host=HOST, connection_mode="network", media_backend="no_media", timeout=15) as mini:
+with connect(HOST) as mini:
     show(mini, "start")
     mini.enable_motors()  # motors come up disabled after a robot reboot
     mini.wake_up()
