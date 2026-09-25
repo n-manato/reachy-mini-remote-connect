@@ -1,0 +1,32 @@
+#!/bin/sh
+# NetworkManager dispatcher hook for the eduroam USB Wi-Fi adapter (wlan1).
+#
+# Traffic that arrives on the eduroam address (e.g. SSH from the campus VPN)
+# must be answered through wlan1 even if the default route is on wlan0, so
+# packets sourced from that address use a dedicated routing table.
+#
+# Installed to /etc/NetworkManager/dispatcher.d/ by setup_eduroam.py.
+
+IFACE="$1"
+ACTION="$2"
+TABLE=101
+PREF=1001
+
+[ "$IFACE" = "wlan1" ] || exit 0
+
+case "$ACTION" in
+    up|dhcp4-change)
+        ADDR="$DHCP4_IP_ADDRESS"
+        GW="${DHCP4_ROUTERS%% *}"
+        [ -n "$ADDR" ] && [ -n "$GW" ] || exit 0
+        ip route replace default via "$GW" dev wlan1 table $TABLE
+        while ip rule del pref $PREF 2>/dev/null; do :; done
+        ip rule add from "$ADDR" table $TABLE pref $PREF
+        logger -t eduroam-route "wlan1 $ADDR via $GW (table $TABLE)"
+        ;;
+    down)
+        while ip rule del pref $PREF 2>/dev/null; do :; done
+        ip route flush table $TABLE 2>/dev/null
+        ;;
+esac
+exit 0

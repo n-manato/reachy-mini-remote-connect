@@ -1,0 +1,13 @@
+# local environment
+.venv/
+__pycache__/
+*.pyc
+
+# robot IPs and passwords (see *.example.json)
+robot_config.json
+robots.json
+
+# build output and captures
+dist/
+*.jpg
+*.wav

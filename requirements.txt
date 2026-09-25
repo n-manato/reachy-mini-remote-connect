@@ -1,0 +1,2 @@
+reachy_mini==1.9.0
+paramiko
