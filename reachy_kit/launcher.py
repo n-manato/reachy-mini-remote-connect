@@ -9,8 +9,8 @@ eduroam addresses into the VPN, and eduroam itself blocks client-to-client.
 4. Opens the check page in the browser: robot camera, USB webcam (a panel shows
    "Not connected" when its camera is missing), a button to listen to the
    robot microphone, and the app's state
-5. Runs the app (a ReachyMiniApp subclass, my_app.py by default) exactly like
-   the SDK does, but with a ReachyMini that works over the tunnel
+5. Runs the app (a ReachyMiniApp subclass, my_app.py by default; loaded and
+   checked before connecting) with the same ReachyMini, which works over the tunnel
 6. On Ctrl+C or the "Quit" button: stops the app, puts the robot to sleep,
    closes everything
 
@@ -32,6 +32,7 @@ import threading
 import traceback
 import urllib.request
 import webbrowser
+from typing import Optional
 
 from .tunnel import MIC_PORT, ROBOT_CAMERA_PORT, WEBCAM_PORT, close_tunnel, open_tunnel
 
@@ -189,21 +190,25 @@ def preflight(ip: str, isolated_subnet: str = "") -> None:
 
 def stream_available(url: str) -> bool:
     try:
-        with urllib.request.urlopen(f"{url}/snapshot.jpg", timeout=6) as r:
+        with urllib.request.urlopen(f"{url}/health", timeout=6) as r:  # tiny reply, not a whole JPEG
             return r.status == 200
     except OSError:
         return False
 
 
 def load_app(path: str):
-    """Import APP.py and instantiate the ReachyMiniApp subclass it defines."""
+    """Import APP.py and instantiate the ReachyMiniApp subclass it defines.
+
+    Runs before connecting, so a broken app never leaves the robot awake.
+    """
     from reachy_mini.apps.app import ReachyMiniApp
 
-    if not os.path.isfile(path):
-        fail(f"App file not found: {path}")
     sys.path.insert(0, os.path.dirname(os.path.abspath(path)))  # let the app import its neighbours
     spec = importlib.util.spec_from_file_location("student_app", path)
     module = importlib.util.module_from_spec(spec)
+    # Registered like a normal import: ReachyMiniApp looks its own module up by
+    # name (e.g. to find the static/ folder of apps with a settings page).
+    sys.modules["student_app"] = module
     try:
         spec.loader.exec_module(module)
     except Exception:
@@ -213,27 +218,52 @@ def load_app(path: str):
             if isinstance(c, type) and issubclass(c, ReachyMiniApp) and c.__module__ == module.__name__]
     if not apps:
         fail(f"{path} does not define a class that inherits from ReachyMiniApp.")
-    return apps[0]()
-
-
-def run_app(app, state: dict) -> None:
-    """Run the app like the SDK's wrapped_run, but with the tunnel-aware ReachyMini."""
-    import reachy_mini.apps.app as app_module
-
-    from .remote import TunnelReachyMini
-
-    # wrapped_run() builds its ReachyMini through this name; a plain one would
-    # try WebRTC and hang over the VPN.
-    app_module.ReachyMini = TunnelReachyMini
-    state["app"] = "running"
     try:
-        app.wrapped_run()
+        return apps[0]()
+    except Exception:
+        traceback.print_exc()
+        fail(f"Could not create {apps[0].__name__} (see the error above).")
+
+
+def start_settings_page(app) -> Optional[threading.Thread]:
+    """Serve the app's settings page (custom_app_url) like the SDK's wrapped_run does."""
+    if app.settings_app is None:
+        return None
+    import uvicorn
+    from urllib.parse import urlparse
+
+    url = urlparse(app.custom_app_url)
+    server = uvicorn.Server(uvicorn.Config(app.settings_app, host=url.hostname, port=url.port, log_level="warning"))
+
+    def serve() -> None:
+        t = threading.Thread(target=server.run, daemon=True)
+        t.start()
+        app.stop_event.wait()
+        server.should_exit = True
+        t.join(timeout=5)
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    print(f"App settings page: http://127.0.0.1:{url.port}/")
+    return thread
+
+
+def run_app(app, mini, state: dict) -> None:
+    """Run the app like the SDK's wrapped_run, but with our tunnel-aware ReachyMini."""
+    state["app"] = "running"
+    settings = start_settings_page(app)
+    try:
+        app.run(mini, app.stop_event)
         state["app"] = "finished"
         if not app.stop_event.is_set():  # the app ended on its own, not via Quit
             print("App finished. Press Quit (or Ctrl+C) to disconnect.")
     except Exception:
         state["app"] = "error (see the console)"
         traceback.print_exc()
+    finally:
+        if settings is not None:
+            app.stop_event.set()
+            settings.join(timeout=5)
 
 
 def make_viewer(cfg: dict, stop: threading.Event, status: dict) -> http.server.ThreadingHTTPServer:
@@ -281,19 +311,30 @@ def make_viewer(cfg: dict, stop: threading.Event, status: dict) -> http.server.T
 
 
 def main() -> None:
-    app_path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "my_app.py")
-    if not os.path.isfile(app_path):
-        print(f"No app at {app_path}; only the check page will run.")
-        app_path = ""
+    if len(sys.argv) > 1:
+        app_path = sys.argv[1]
+        if not os.path.isfile(app_path):  # a typo must not silently run no app
+            fail(f"App file not found: {app_path}")
+    else:
+        app_path = os.path.join(ROOT, "my_app.py")
+        if not os.path.isfile(app_path):
+            print(f"No app at {app_path}; only the check page will run.")
+            app_path = ""
     cfg = load_config()
     print(f"Robot: {cfg['name']} ({cfg['ip']})")
     preflight(cfg["ip"], cfg.get("isolated_subnet", ""))
 
+    # Load the app before connecting: a broken app must fail before the robot wakes up.
+    app = None
+    if app_path:
+        print(f"Loading app: {app_path}")
+        app = load_app(app_path)
+
     print("Opening SSH tunnel...")
+    w = cfg["webcam"]
     try:
-        w = cfg["webcam"]
-        client, servers = open_tunnel(cfg["ip"], cfg["ssh_password"], LOCAL, cfg["ssh_user"],
-                                      f"--width {int(w['width'])} --height {int(w['height'])} --fps {int(w['fps'])}")
+        clients, servers = open_tunnel(cfg["ip"], cfg["ssh_password"], LOCAL, cfg["ssh_user"],
+                                       f"--width {int(w['width'])} --height {int(w['height'])} --fps {w['fps']}")
     except OSError as e:
         if getattr(e, "winerror", None) == 10048 or "address already in use" in str(e).lower():
             fail("Port 8000/8443/8090-8093 is already in use. Is another run.bat or tunnel running?")
@@ -301,50 +342,57 @@ def main() -> None:
     except Exception as e:
         fail(f"SSH connection failed: {e}")
 
-    # Imported late: loading the SDK takes a few seconds.
     from .remote import connect
 
     stop = threading.Event()
     status = {"app": "none"}
-    viewer = app = app_thread = None
+    viewer = app_thread = None
     try:
-        with connect(LOCAL) as mini:
-            print("Waking up the robot...")
-            set_volume(cfg["volume"])
-            mini.enable_motors()  # motors come up disabled after a robot reboot
-            mini.wake_up()  # head up + start-up sound (played through the daemon API)
-
-            viewer = make_viewer(cfg, stop, status)
-            url = f"http://{LOCAL}:{viewer.server_address[1]}/"
-            print(f"Check page: {url}")
-            webbrowser.open(url)
-
-            if app_path:
-                app = load_app(app_path)
-                print(f"Starting app: {type(app).__name__} ({app_path})")
-                app_thread = threading.Thread(target=run_app, args=(app, status), daemon=True)
-                app_thread.start()
-            print("Running. Press Ctrl+C or the Quit button to stop.")
+        with connect(LOCAL, camera_size=(int(w["width"]), int(w["height"]))) as mini:
             try:
-                while not stop.wait(0.5):
+                print("Waking up the robot...")
+                set_volume(cfg["volume"])
+                mini.enable_motors()  # motors come up disabled after a robot reboot
+                mini.wake_up()  # head up + start-up sound (played through the daemon API)
+
+                viewer = make_viewer(cfg, stop, status)
+                url = f"http://{LOCAL}:{viewer.server_address[1]}/"
+                print(f"Check page: {url}")
+                webbrowser.open(url)
+
+                print("Running. Press Ctrl+C or the Quit button to stop.")
+                if app is not None:
+                    print(f"Starting app: {type(app).__name__} ({app_path})", flush=True)
+                    app_thread = threading.Thread(target=run_app, args=(app, mini, status), daemon=True)
+                    app_thread.start()
+                try:
+                    while not stop.wait(0.5):
+                        pass
+                except KeyboardInterrupt:
                     pass
-            except KeyboardInterrupt:
-                pass
-            stop.set()
-            if app_thread and app_thread.is_alive():
-                print("Stopping the app...")
-                app.stop()
-                app_thread.join(timeout=10)
-                if app_thread.is_alive():
-                    print("The app did not stop within 10 s (does run() check stop_event?).")
-            print("Putting the robot to sleep...")
-            mini.goto_sleep()
+            finally:
+                # Always hand the robot back asleep, whatever happened above.
+                stop.set()
+                if app_thread and app_thread.is_alive():
+                    print("Stopping the app...")
+                    app.stop()
+                    app_thread.join(timeout=10)
+                    if app_thread.is_alive():
+                        print("The app did not stop within 10 s (does run() check stop_event?); "
+                              "blocking its commands.")
+                        mini.take_control()  # the app's next command raises instead of fighting the sleep
+                        app_thread.join(timeout=2)
+                print("Putting the robot to sleep...")
+                try:
+                    mini.goto_sleep()
+                except Exception as e:
+                    print(f"Could not put the robot to sleep: {e}")
     finally:
         stop.set()
         if viewer:
             viewer.shutdown()
             viewer.server_close()
-        close_tunnel(client, servers)
+        close_tunnel(clients, servers)
         print("Disconnected.")
 
 

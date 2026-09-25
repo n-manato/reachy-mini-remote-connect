@@ -46,11 +46,12 @@ The connection is already handled for you: you write the app in **`my_app.py`** 
 2. Double-click **`run.bat`**. Keep the console window open. It shows:
    ```
    Robot: reachy-mini-2 (<robot-ip>)
+   Loading app: my_app.py
    Opening SSH tunnel...
    Waking up the robot...
    Check page: http://127.0.0.1:xxxxx/
-   Starting app: MyApp (my_app.py)
    Running. Press Ctrl+C or the Quit button to stop.
+   Starting app: MyApp (my_app.py)
    ```
 3. The **check page** opens in your browser:
    - **Robot camera** – what the robot sees
@@ -95,6 +96,7 @@ The robot is already awake when `run()` starts, and it is put back to sleep afte
 | Set a target immediately | `reachy_mini.set_target(antennas=np.deg2rad([20, -20]))` |
 | Read the head pose | `reachy_mini.get_current_head_pose()` |
 | Robot camera | `frame = reachy_mini.media.get_frame()` (BGR numpy array, use with OpenCV) |
+| Look at a point in the camera image | `reachy_mini.look_at_image(u, v, duration=1.0)` (pixels in the 640x360 frame) |
 | Play a built-in sound | `reachy_mini.media.play_sound("dance1.wav")` (`wake_up`, `go_sleep`, `dance1`, `confused1`, `impatient1`, `count`) |
 | Robot microphone | `reachy_mini.media.start_recording()`, then `chunk = reachy_mini.media.get_audio_sample()` (float32 `(n, 2)` at 16 kHz, or `None`) |
 | Robot speaker (your own audio) | `reachy_mini.media.start_playing()`, `reachy_mini.media.push_audio_sample(samples)` (float32 at 16 kHz), `stop_playing()` |

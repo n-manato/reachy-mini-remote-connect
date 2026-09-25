@@ -24,8 +24,10 @@ and stop when the SSH session that started them closes; a second user reuses run
 
 `reachy_kit.connect()` returns a `ReachyMini` that skips WebRTC without asking the daemon to release
 the camera (plain `media_backend="no_media"` would, and that kills the camera stream), and whose
-`media` is `reachy_kit.remote.TunnelMedia`. The launcher runs student apps through the SDK's own
-`ReachyMiniApp.wrapped_run()` with that `ReachyMini` swapped in.
+`media` is `reachy_kit.remote.TunnelMedia`. The launcher loads the student app before connecting
+(a broken app never wakes the robot), then calls `app.run(mini, app.stop_event)` with its own
+`ReachyMini`, serving the app's settings page (`custom_app_url`) like the SDK does. If an app ignores
+Quit for 10 s, `mini.take_control()` makes its further commands raise, and the robot is put to sleep.
 
 ## Tunnel only
 

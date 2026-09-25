@@ -8,7 +8,7 @@ daemon also uses (dsnoop / dmix), so they do not block it.
                                     (CORS open, so the viewer page can play it)
     TCP 127.0.0.1:8093              send raw PCM S16LE 16 kHz 2 ch -> robot speaker
 
-Started automatically by reachy_tunnel.py. Only listens on 127.0.0.1.
+Started automatically by reachy_kit.tunnel. Only listens on 127.0.0.1.
 """
 
 import http.server

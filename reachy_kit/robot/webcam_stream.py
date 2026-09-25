@@ -5,12 +5,13 @@
                   socket, so it works without WebRTC (whose UDP media does
                   not get through the campus VPN)
 
-Started automatically by reachy_tunnel.py. Only listens on 127.0.0.1, so it
+Started automatically by reachy_kit.tunnel. Only listens on 127.0.0.1, so it
 is reachable through the SSH tunnel only.
 
     GET /               viewer page
     GET /stream         multipart MJPEG (always the latest frame, no backlog)
     GET /snapshot.jpg   single JPEG
+    GET /health         200 once a frame has been captured
 
 Usage:
     python3 webcam_stream.py [--source webcam|robot] [--device PATH]
@@ -101,6 +102,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/":
             self._send(200, "text/html", PAGE)
+        elif self.path == "/health":  # cheap liveness check for the check page
+            if latest_frame is None:
+                self._send(503, "text/plain", b"no frame yet")
+            else:
+                self._send(200, "text/plain", b"ok")
         elif self.path.startswith("/snapshot.jpg"):
             with frame_cond:
                 frame_cond.wait_for(lambda: latest_frame is not None, timeout=5)
