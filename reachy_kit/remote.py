@@ -64,36 +64,61 @@ def play_sound(host: str, sound_file: str) -> None:
         logger.warning("play_sound(%s) failed: %s", sound_file, e)
 
 
+def jpeg_size(jpg: bytes) -> Optional[tuple[int, int]]:
+    """(width, height) from a JPEG's SOF header, without decoding it."""
+    i = 2
+    while i + 9 < len(jpg):
+        if jpg[i] != 0xFF:
+            return None
+        marker, seg = jpg[i + 1], int.from_bytes(jpg[i + 2:i + 4], "big")
+        if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+            return int.from_bytes(jpg[i + 7:i + 9], "big"), int.from_bytes(jpg[i + 5:i + 7], "big")
+        i += 2 + seg
+    return None
+
+
 class TunnelCamera:
     """Camera info for the robot-camera stream, so SDK helpers like look_at_image() work.
 
-    The stream is the daemon's default-resolution feed scaled to `size`, so the
-    intrinsics are the SDK's calibration for that resolution, scaled the same way.
+    The daemon hands out its default-resolution feed (1280x720 on the wireless
+    robot) and the stream scales it down, so the intrinsics are the SDK's
+    calibration for the size of the frames actually received.
     """
 
-    def __init__(self, specs_name: str, size: tuple[int, int]) -> None:
-        from reachy_mini.media.camera_constants import CameraResolution, get_camera_specs_by_name
-        from reachy_mini.media.camera_utils import scale_intrinsics
+    def __init__(self, specs_name: str, media: "TunnelMedia", fallback_size: tuple[int, int]) -> None:
+        from reachy_mini.media.camera_constants import get_camera_specs_by_name
 
         self.camera_specs = get_camera_specs_by_name(specs_name)
-        self.resolution = size
-        res = self.camera_specs.default_resolution.value  # (w, h, fps, crop_scale)
-        full = CameraResolution.R3840x2592at30fps.value
-        K = scale_intrinsics(self.camera_specs.K, (full[0], full[1]), (res[0], res[1]), res[3])
-        sx, sy = size[0] / res[0], size[1] / res[1]
-        self.K = K * np.array([[sx], [sy], [1.0]])  # fx, cx scale with width; fy, cy with height
         self.D = self.camera_specs.D
+        self._media = media
+        self._fallback_size = fallback_size
+
+    @property
+    def resolution(self) -> tuple[int, int]:
+        # The stream may have been started by someone else at another size.
+        return self._media.frame_size or self._fallback_size
+
+    @property
+    def K(self) -> np.ndarray:
+        from reachy_mini.media.camera_utils import intrinsics_for_size
+
+        crop_scale = self.camera_specs.default_resolution.value[3]
+        return intrinsics_for_size(self.camera_specs.K, crop_scale, self.resolution)
 
 
 class TunnelMedia:
     """Drop-in for the SDK's MediaManager, carried over the SSH tunnel."""
 
-    def __init__(self, host: str = "127.0.0.1", camera: Optional[TunnelCamera] = None) -> None:
+    STALE_AFTER = 3.0  # s without a new frame -> the stream is down, report None
+
+    def __init__(self, host: str = "127.0.0.1") -> None:
         self.host = host
-        self.camera = camera
+        self.camera: Optional[TunnelCamera] = None  # set by TunnelReachyMini
+        self.frame_size: Optional[tuple[int, int]] = None  # of the frames actually received
         # camera: one persistent MJPEG reader keeps the latest frame
         self._cam_lock = threading.Condition()
         self._cam_jpeg: Optional[bytes] = None
+        self._cam_time = 0.0
         self._cam_thread: Optional[threading.Thread] = None
         self._cam_stop = threading.Event()
         # microphone
@@ -103,6 +128,7 @@ class TunnelMedia:
         self._mic_thread: Optional[threading.Thread] = None
         self._mic_queue: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=250)  # ~5 s
         self._mic_retry_at = 0.0
+        self._mic_reconnecting = False
         # speaker
         self._speaker: Optional[socket.socket] = None
 
@@ -123,21 +149,31 @@ class TunnelMedia:
                             pass
                         jpg = r.read(length)
                         with self._cam_lock:
-                            self._cam_jpeg = jpg
+                            self._cam_jpeg, self._cam_time = jpg, time.monotonic()
+                            self.frame_size = jpeg_size(jpg) or self.frame_size
                             self._cam_lock.notify_all()
             except (OSError, ValueError):
                 pass
+            with self._cam_lock:
+                self._cam_jpeg = None  # never hand out a frozen frame as if it were live
             self._cam_stop.wait(1)  # stream dropped: reconnect
 
     def get_frame_jpeg(self, timeout: float = 5.0) -> Optional[bytes]:
-        """Latest robot camera frame as JPEG bytes (waits up to `timeout` for the first one)."""
-        if self._cam_thread is None or not self._cam_thread.is_alive():
-            self._cam_stop.clear()
-            self._cam_thread = threading.Thread(target=self._read_camera, daemon=True)
-            self._cam_thread.start()
-        with self._cam_lock:
-            self._cam_lock.wait_for(lambda: self._cam_jpeg is not None, timeout=timeout)
-            return self._cam_jpeg
+        """Latest robot camera frame as JPEG bytes, or None if the stream is down.
+
+        Waits up to `timeout` for the first frame after (re)connecting.
+        """
+        with self._cam_lock:  # one reader, even if several threads ask at once
+            if self._cam_thread is None or not self._cam_thread.is_alive():
+                self._cam_stop.clear()
+                self._cam_thread = threading.Thread(target=self._read_camera, daemon=True)
+                self._cam_thread.start()
+
+            def fresh() -> bool:
+                return self._cam_jpeg is not None and time.monotonic() - self._cam_time < self.STALE_AFTER
+
+            self._cam_lock.wait_for(fresh, timeout=timeout)
+            return self._cam_jpeg if fresh() else None
 
     def get_frame(self) -> Optional[np.ndarray]:
         """Latest robot camera frame as a BGR array, like the SDK (requires opencv)."""
@@ -176,6 +212,8 @@ class TunnelMedia:
         """(Re)start the reader thread if it is not running. Call with _mic_lock held."""
         if self._mic_thread is not None and self._mic_thread.is_alive():
             return
+        if self._mic_resp is not None:
+            self._mic_resp.close()
         resp = urllib.request.urlopen(f"http://{self.host}:{MIC_PORT}/mic", timeout=10)
         self._mic_resp = resp
         # The thread gets its own response and queue, so an old thread that is
@@ -212,16 +250,31 @@ class TunnelMedia:
             return self._mic_queue.get_nowait()
         except queue.Empty:
             pass
-        # Reader died (stream stalled, robot-side error): reconnect, at most once a second.
-        with self._mic_lock:
+        # Reader died (stream stalled, robot-side error): reconnect in the background,
+        # at most once a second. Never wait for the lock: a reconnect in progress
+        # holds it while it talks to the robot, and this poll must not block the app.
+        if not self._mic_lock.acquire(blocking=False):
+            return None
+        try:
             dead = self._mic_thread is None or not self._mic_thread.is_alive()
-            if self._mic_recording and dead and time.monotonic() >= self._mic_retry_at:
+            due = time.monotonic() >= self._mic_retry_at
+            if self._mic_recording and dead and due and not self._mic_reconnecting:
                 self._mic_retry_at = time.monotonic() + 1.0
-                try:
-                    self._start_mic_reader()
-                except OSError as e:
-                    logger.warning("microphone reconnect failed: %s", e)
+                self._mic_reconnecting = True
+                threading.Thread(target=self._reconnect_mic, daemon=True).start()
+        finally:
+            self._mic_lock.release()
         return None
+
+    def _reconnect_mic(self) -> None:
+        try:
+            with self._mic_lock:
+                if self._mic_recording:
+                    self._start_mic_reader()
+        except OSError as e:
+            logger.warning("microphone reconnect failed: %s", e)
+        finally:
+            self._mic_reconnecting = False
 
     def stop_recording(self) -> None:
         with self._mic_lock:
@@ -287,8 +340,11 @@ class TunnelReachyMini(ReachyMini):
         kwargs.setdefault("timeout", 15)
         kwargs["media_backend"] = "no_media"  # skip WebRTC, it cannot pass the VPN
         super().__init__(host=host, **kwargs)
-        specs_name = getattr(self.client.get_status(), "camera_specs_name", "") or "wireless"
-        self.media_manager = TunnelMedia(host, TunnelCamera(specs_name, camera_size))
+        # The SDK has just received a status; waiting for the next one costs up to 1 s.
+        specs_name = getattr(self.client.get_status(wait=False), "camera_specs_name", "") or "wireless"
+        media = TunnelMedia(host)
+        media.camera = TunnelCamera(specs_name, media, camera_size)
+        self.media_manager = media
         self._owner: Optional[threading.Thread] = None
         for name in ("send_command", "send_task_request"):  # every motion goes through these
             setattr(self.client, name, self._guarded(getattr(self.client, name)))

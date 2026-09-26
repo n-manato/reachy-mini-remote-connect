@@ -26,10 +26,12 @@ import importlib.util
 import ipaddress
 import json
 import os
+import signal
 import socket
 import sys
 import threading
 import traceback
+import urllib.error
 import urllib.request
 import webbrowser
 from typing import Optional
@@ -140,6 +142,12 @@ def load_config() -> dict:
     cfg.setdefault("volume", 100)
     webcam = {"width": 640, "height": 360, "fps": 8}  # the VPN is slow: leave room for control
     webcam.update(cfg.get("webcam", {}))
+    try:  # these end up on the robot's command line, so only plain numbers
+        webcam = {"width": int(webcam["width"]), "height": int(webcam["height"]), "fps": float(webcam["fps"])}
+    except (TypeError, ValueError):
+        fail('robot_config.json: "webcam" width/height/fps must be numbers, e.g. {"width": 640, "height": 360, "fps": 8}')
+    if min(webcam.values()) <= 0:
+        fail('robot_config.json: "webcam" width/height/fps must be greater than 0')
     cfg["webcam"] = webcam
     return cfg
 
@@ -192,6 +200,15 @@ def stream_available(url: str) -> bool:
     try:
         with urllib.request.urlopen(f"{url}/health", timeout=6) as r:  # tiny reply, not a whole JPEG
             return r.status == 200
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            return False
+        # A stream server started by an older kit (reused, not restarted) has no /health.
+        try:
+            with urllib.request.urlopen(f"{url}/snapshot.jpg", timeout=6) as r:
+                return r.status == 200
+        except OSError:
+            return False
     except OSError:
         return False
 
@@ -251,8 +268,9 @@ def start_settings_page(app) -> Optional[threading.Thread]:
 def run_app(app, mini, state: dict) -> None:
     """Run the app like the SDK's wrapped_run, but with our tunnel-aware ReachyMini."""
     state["app"] = "running"
-    settings = start_settings_page(app)
+    settings = None
     try:
+        settings = start_settings_page(app)
         app.run(mini, app.stop_event)
         state["app"] = "finished"
         if not app.stop_event.is_set():  # the app ended on its own, not via Quit
@@ -334,7 +352,7 @@ def main() -> None:
     w = cfg["webcam"]
     try:
         clients, servers = open_tunnel(cfg["ip"], cfg["ssh_password"], LOCAL, cfg["ssh_user"],
-                                       f"--width {int(w['width'])} --height {int(w['height'])} --fps {w['fps']}")
+                                       f"--width {w['width']} --height {w['height']} --fps {w['fps']}")
     except OSError as e:
         if getattr(e, "winerror", None) == 10048 or "address already in use" in str(e).lower():
             fail("Port 8000/8443/8090-8093 is already in use. Is another run.bat or tunnel running?")
@@ -348,7 +366,7 @@ def main() -> None:
     status = {"app": "none"}
     viewer = app_thread = None
     try:
-        with connect(LOCAL, camera_size=(int(w["width"]), int(w["height"]))) as mini:
+        with connect(LOCAL, camera_size=(w["width"], w["height"])) as mini:
             try:
                 print("Waking up the robot...")
                 set_volume(cfg["volume"])
@@ -371,7 +389,9 @@ def main() -> None:
                 except KeyboardInterrupt:
                     pass
             finally:
-                # Always hand the robot back asleep, whatever happened above.
+                # Always hand the robot back asleep, whatever happened above; a second
+                # Ctrl+C while doing so must not leave it awake with the motors on.
+                signal.signal(signal.SIGINT, signal.SIG_IGN)
                 stop.set()
                 if app_thread and app_thread.is_alive():
                     print("Stopping the app...")
@@ -387,6 +407,8 @@ def main() -> None:
                     mini.goto_sleep()
                 except Exception as e:
                     print(f"Could not put the robot to sleep: {e}")
+    except KeyboardInterrupt:
+        pass  # Ctrl+C during start-up: the robot has been put to sleep above
     finally:
         stop.set()
         if viewer:
