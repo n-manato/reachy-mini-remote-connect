@@ -1,17 +1,12 @@
 @echo off
-rem One-time setup: create .venv and install the Reachy Mini SDK.
+rem One-time setup: Python check/install, .venv, packages, robot connection test.
 cd /d "%~dp0"
-python -m venv .venv || goto :error
-.venv\Scripts\python.exe -m pip install --upgrade pip || goto :error
-.venv\Scripts\python.exe -m pip install -r requirements.txt || goto :error
-if not exist robot_config.json copy robot_config.example.json robot_config.json >nul
-echo.
-echo Setup finished. Fill in robot_config.json, connect GlobalProtect, then run run.bat
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup.ps1"
+if errorlevel 1 (
+    echo.
+    echo Setup did not finish. Read the messages above, fix the problem and run setup.bat again.
+) else (
+    echo.
+    echo Setup finished. Double-click run.bat to start.
+)
 pause
-exit /b 0
-
-:error
-echo.
-echo Setup failed. Make sure Python 3.11 - 3.13 (64-bit) is installed and on PATH.
-pause
-exit /b 1

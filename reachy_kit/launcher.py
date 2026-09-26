@@ -17,8 +17,8 @@ eduroam addresses into the VPN, and eduroam itself blocks client-to-client.
 Usage:
     run.bat [APP.py]     (or: .venv\\Scripts\\python.exe -m reachy_kit.launcher [APP.py])
 
-Copy robot_config.example.json to robot_config.json and fill in the robot's
-name, IP and SSH login (ask the robot admin).
+Set the robot with configure.bat (paste the connection code from the instructor);
+it writes robot_config.json and tests the connection.
 """
 
 import http.server
@@ -134,7 +134,7 @@ def load_config() -> dict:
             cfg = json.load(f)
     except FileNotFoundError:
         fail(f"{CONFIG_PATH} not found.\n"
-             "        Copy robot_config.example.json to robot_config.json and fill it in.")
+             "        Run configure.bat (or setup.bat) and paste the connection code from your instructor.")
     missing = [k for k in ("name", "ip", "ssh_password") if not cfg.get(k)]
     if missing:
         fail(f"robot_config.json is missing: {', '.join(missing)}")
