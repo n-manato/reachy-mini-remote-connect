@@ -356,6 +356,19 @@ class TunnelReachyMini(ReachyMini):
             return send(*args, **kwargs)
         return guarded
 
+    def goto_target(self, *args, **kwargs):
+        try:
+            return super().goto_target(*args, **kwargs)
+        except Exception as e:
+            if "time value is out of range" not in str(e):
+                raise
+            # Robot-side SDK bug (reachy_mini 1.9.0, daemon/backend/abstract.py): the goto
+            # loop reads the clock twice, so on a busy robot the last step can compute
+            # t > duration and abort just before the end. Run the move again to finish it
+            # (it starts from where the robot already is, so it barely moves).
+            logger.info("goto_target hit the daemon's timing bug; finishing the move")
+            return super().goto_target(*args, **kwargs)
+
     def take_control(self) -> None:
         """From now on only the calling thread may send commands (e.g. an app that ignores Quit)."""
         self._owner = threading.current_thread()
