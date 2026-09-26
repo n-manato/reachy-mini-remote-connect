@@ -2,5 +2,7 @@
 reachy_kit/robot/* text eol=lf
 admin/robot/* text eol=lf
 *.py text eol=lf
-*.bat text eol=crlf
+# .bat files are stored with CRLF in the repo itself, so GitHub "Download ZIP" (no eol
+# conversion) also gives Windows line endings; cmd can misparse LF-only batch files.
+*.bat -text
 *.ps1 text eol=crlf
