@@ -11,34 +11,35 @@ The connection is already handled for you: you write the app in **`my_app.py`** 
 4. runs your app,
 5. when you press **Quit** (or Ctrl+C): stops your app and puts the robot back to sleep.
 
+## Quick start
+
+With **GlobalProtect connected** (any Wi-Fi: campus, home, dorm, ...):
+
+1. Get the kit: `git clone https://github.com/n-manato/reachy-mini-remote-connect.git`
+   (or **Code → Download ZIP** on GitHub and unzip it). Put it in a normal folder such as
+   `C:\reachy-mini`, **not in OneDrive**.
+2. Double-click **`setup.bat`** and follow the prompts. It
+   - finds Python 3.11–3.13, or offers to install Python 3.13 for you (winget),
+   - installs everything into a `.venv` folder (a few minutes, about 1 GB),
+   - asks for the **connection code** from your instructor (one line starting with `reachy1:`),
+   - tests the connection to the robot and tells you what to fix if something is wrong.
+3. Double-click **`run.bat`**.
+
+To switch to another robot later, double-click **`configure.bat`** and paste its code.
+
 ## Requirements
 
 | | |
 |---|---|
 | OS | Windows 10 / 11 |
-| Python | **3.11 – 3.13, 64-bit** (tested with 3.13). Tick **"Add python.exe to PATH"** when installing. |
+| Python | 3.11 – 3.13, 64-bit; `setup.bat` finds it or installs 3.13 |
 | Disk | About 1 GB free |
-| VPN | **GlobalProtect**, signed in with **your own** university account (on or off campus) |
+| VPN | **GlobalProtect**, signed in with **your own** university account |
+| Wi-Fi | Any – the robot is reached through the VPN |
 | Browser | Any (Edge, Chrome, …) |
 
-## Setup (once)
-
-1. Install Python 3.13 (64-bit) from <https://www.python.org/downloads/> and tick **"Add python.exe to PATH"**.
-2. Double-click **`setup.bat`**. It creates a `.venv` folder and installs the Reachy Mini SDK (a few minutes).
-3. Open **`robot_config.json`** (created by `setup.bat` from `robot_config.example.json`) and fill in
-   the robot's `name`, `ip` and `ssh_password`. **Ask your instructor for these values.**
-
-   ```json
-   {
-     "name": "reachy-mini-2",
-     "ip": "10.0.0.12",
-     "ssh_user": "pollen",
-     "ssh_password": "ASK-YOUR-INSTRUCTOR",
-     "isolated_subnet": "",
-     "volume": 100,
-     "webcam": {"width": 640, "height": 360, "fps": 8}
-   }
-   ```
+No connection code? Press Enter at the prompt and type the robot's name, IP address and SSH
+password (ask your instructor). They are saved in `robot_config.json`, which is never committed.
 
 ## Run
 
@@ -123,8 +124,11 @@ The VPN is slow (about 0.2–0.3 s each way), so:
 
 | Message / symptom | What to do |
 |---|---|
-| `Traffic to the robot is not going through GlobalProtect.` | Connect GlobalProtect and run again. |
-| `Cannot reach the robot (…:22)` | Check that GlobalProtect is connected and the robot is on. The robot's IP may have changed – ask your instructor. |
+| `GlobalProtect is not connected.` / `Traffic to the robot is not going through GlobalProtect.` | Connect GlobalProtect and run again. |
+| `setup.bat`: `Python 3.11-3.13 (64-bit) was not found` | Let it install Python 3.13, or install it from python.org, then run `setup.bat` again. |
+| `That code did not work` | Copy the whole connection code (one line starting with `reachy1:`) and paste it again. |
+| `Login failed: wrong SSH user or password` | Run `configure.bat` and paste the code again, or check the details with your instructor. |
+| `The robot (…) does not answer on port 22` | Check that GlobalProtect is connected and the robot is on. The robot's IP may have changed – ask your instructor for a new code and run `configure.bat`. |
 | `Port 8000/8443/8090-8093 is already in use` | Another `run.bat` is still running on this PC. Close it first. |
 | `SSH connection failed` | Wrong `ssh_user` / `ssh_password`, or the robot is still booting. |
 | `does not define a class that inherits from ReachyMiniApp` | Your app file needs `class Something(ReachyMiniApp):` with a `run()` method. |
@@ -138,8 +142,10 @@ The VPN is slow (about 0.2–0.3 s each way), so:
 ```
 my_app.py                    your app (start here)
 examples/all_features_app.py tour of every feature
-run.bat / setup.bat          start / one-time setup
-robot_config.example.json    template for robot_config.json (not committed)
+setup.bat                    one-time setup (Python, packages, robot connection)
+run.bat                      start
+configure.bat                change the robot / re-test the connection
+robot_config.example.json    what robot_config.json looks like (the real one is not committed)
 requirements.txt             Python packages
 reachy_kit/                  the connection (you do not need to change it)
 admin/                       tools for the robot admin, see admin/README.md

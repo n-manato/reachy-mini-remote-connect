@@ -29,6 +29,19 @@ the camera (plain `media_backend="no_media"` would, and that kills the camera st
 `ReachyMini`, serving the app's settings page (`custom_app_url`) like the SDK does. If an app ignores
 Quit for 10 s, `mini.take_control()` makes its further commands raise, and the robot is put to sleep.
 
+## Connection codes for students
+
+Students set up with `setup.bat` and paste a one-line connection code, which holds the robot's
+name, IP and SSH login (base64 only, not encrypted – share it like the password):
+
+```
+.venv\Scripts\python.exe admin\make_code.py reachy-mini-2 <robot eduroam IP> --subnet <robots' eduroam subnet>
+```
+
+`--subnet` is optional; with it the kit can tell students "not going through GlobalProtect" when
+their PC reaches the robot's subnet directly. When a robot's eduroam IP changes, make a new code;
+students run `configure.bat` and paste it.
+
 ## Tunnel only
 
 ```

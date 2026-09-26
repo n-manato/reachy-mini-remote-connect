@@ -23,11 +23,9 @@ it writes robot_config.json and tests the connection.
 
 import http.server
 import importlib.util
-import ipaddress
 import json
 import os
 import signal
-import socket
 import sys
 import threading
 import traceback
@@ -36,6 +34,7 @@ import urllib.request
 import webbrowser
 from typing import Optional
 
+from .netcheck import robot_unreachable_reason
 from .tunnel import MIC_PORT, ROBOT_CAMERA_PORT, WEBCAM_PORT, close_tunnel, open_tunnel
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -166,34 +165,10 @@ def set_volume(volume: int) -> None:
 
 
 def preflight(ip: str, isolated_subnet: str = "") -> None:
-    """Check that the robot is reached through the VPN.
-
-    isolated_subnet: the robots' Wi-Fi subnet, which blocks client-to-client
-    traffic. If this PC talks to the robot from inside it, the VPN is not in use.
-    """
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect((ip, 22))
-        src = ipaddress.ip_address(s.getsockname()[0])
-        s.close()
-    except OSError:
-        fail("No network route to the robot. Is GlobalProtect connected?")
-    if isolated_subnet and src in ipaddress.ip_network(isolated_subnet):
-        # With GlobalProtect up, this subnet is routed into the VPN; going out
-        # through the Wi-Fi directly means GP is down.
-        fail("Traffic to the robot is not going through GlobalProtect.\n"
-             "        Connect GlobalProtect and try again.")
-    for attempt in range(3):  # the VPN sometimes drops the first packets after (re)connecting
-        try:
-            socket.create_connection((ip, 22), timeout=5).close()
-            break
-        except OSError:
-            pass
-    else:
-        fail(f"Cannot reach the robot ({ip}:22).\n"
-             "        - Is GlobalProtect connected?\n"
-             "        - Is the robot powered on?\n"
-             "        - The robot's eduroam IP may have changed (update robot_config.json).")
+    """Check that the robot is reached through the VPN (whatever Wi-Fi this PC is on)."""
+    reason = robot_unreachable_reason(ip, isolated_subnet)
+    if reason:
+        fail(reason)
 
 
 def stream_available(url: str) -> bool:

@@ -14,8 +14,9 @@ import getpass
 import ipaddress
 import json
 import os
-import socket
 import sys
+
+from .netcheck import robot_unreachable_reason
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -79,36 +80,14 @@ def test_connection(cfg: dict) -> bool:
     ip = cfg["ip"]
     print(f"\nTesting the connection to {cfg['name']} ({ip})...")
 
-    # 1. The robot must be reached through the VPN, whatever Wi-Fi this PC is on.
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect((ip, 22))
-        src = s.getsockname()[0]
-        s.close()
-    except OSError:
-        print("  [NG] No network route to the robot. Is GlobalProtect connected?")
-        return False
-    subnet = cfg.get("isolated_subnet")
-    if subnet and ipaddress.ip_address(src) in ipaddress.ip_network(subnet):
-        print("  [NG] Traffic to the robot does not go through GlobalProtect. Connect GlobalProtect.")
-        return False
-
-    # 2. SSH port
-    for _ in range(3):
-        try:
-            socket.create_connection((ip, 22), timeout=5).close()
-            break
-        except OSError:
-            pass
-    else:
-        print("  [NG] The robot does not answer on port 22.\n"
-              "       - Is GlobalProtect connected (with your own account)?\n"
-              "       - Is the robot powered on?\n"
-              "       - Is the IP address right? (ask your instructor)")
+    # 1. Reached through the VPN (whatever Wi-Fi this PC is on), SSH port open
+    reason = robot_unreachable_reason(ip, cfg.get("isolated_subnet", ""))
+    if reason:
+        print(f"  [NG] {reason}")
         return False
     print("  [OK] The robot is reachable through the VPN.")
 
-    # 3. Login and daemon
+    # 2. Login and robot software
     import paramiko
 
     client = paramiko.SSHClient()
