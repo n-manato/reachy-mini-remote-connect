@@ -5,6 +5,7 @@ reached through GlobalProtect, so the checks are about the VPN, not the Wi-Fi.
 """
 
 import ipaddress
+import os
 import socket
 import subprocess
 import sys
@@ -15,9 +16,12 @@ def globalprotect_connected() -> Optional[bool]:
     """True/False from the GlobalProtect network adapter on Windows, None if unknown."""
     if sys.platform != "win32":
         return None
+    # The built-in Windows PowerShell, not whatever "powershell" comes first on PATH.
+    powershell = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                              "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
     try:
         out = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
+            [powershell, "-NoProfile", "-Command",
              "(Get-NetAdapter -InterfaceDescription 'PANGP*' -ErrorAction SilentlyContinue).Status -join ','"],
             capture_output=True, text=True, timeout=15,
         ).stdout.strip()
